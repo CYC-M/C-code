@@ -6,6 +6,22 @@ This is the home of the C-code project including our self extensible coding agen
 
 ## Installation
 
+### Homebrew (macOS and Linux)
+
+Install the C-code CLI with:
+
+```bash
+brew install CYC-M/tap/c-code
+```
+
+After installation, all three commands start C-code:
+
+```bash
+cc
+c-code
+ccode
+```
+
 ### Download a release
 
 For most users, download a prebuilt package from the [GitHub Releases page](https://github.com/CYC-M/C-code/releases). Choose the archive matching your operating system and CPU:
