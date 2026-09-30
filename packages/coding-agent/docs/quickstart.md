@@ -12,10 +12,11 @@ Clone the repository and build the CLI. This requires Node.js 22.19 or newer:
 git clone https://github.com/CYC-M/C-code
 cd C-code
 npm install --ignore-scripts
+npm run hydrate:model-data   # fetch model metadata once (network required)
 npm run build:offline
 ```
 
-C-code does not require dependency lifecycle scripts for a normal installation.
+C-code does not require dependency lifecycle scripts for a normal installation. `hydrate:model-data` only runs while building from a source checkout; the generated metadata is not stored in git, so it must be fetched once on a fresh clone.
 
 Verify the build:
 

@@ -28,6 +28,7 @@ Install Termux from [GitHub or F-Droid](https://github.com/termux/termux-app#ins
    git clone https://github.com/CYC-M/C-code
    cd C-code
    npm install --ignore-scripts
+   npm run hydrate:model-data
    npm run build:offline
    ```
 

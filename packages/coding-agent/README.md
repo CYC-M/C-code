@@ -10,6 +10,7 @@ Run from source:
 
 ```bash
 npm install --ignore-scripts
+npm run hydrate:model-data   # fetch model metadata once (network required)
 npm run build:offline
 ```
 

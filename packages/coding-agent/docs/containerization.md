@@ -44,6 +44,7 @@ RUN apt-get update \
 RUN git clone https://github.com/CYC-M/C-code /opt/c-code \
   && cd /opt/c-code \
   && npm install --ignore-scripts \
+  && npm run hydrate:model-data \
   && npm run build:offline
 
 WORKDIR /workspace
