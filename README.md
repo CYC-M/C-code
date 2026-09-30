@@ -22,6 +22,22 @@ c-code
 ccode
 ```
 
+### Windows PowerShell
+
+Run this command in PowerShell. It detects x64 or ARM64, downloads the latest C-code release, verifies its SHA-256 checksum, installs it for the current user, and adds the commands to `PATH`:
+
+```powershell
+irm https://raw.githubusercontent.com/CYC-M/C-code/main/install.ps1 | iex
+```
+
+Open a new terminal window after installation, then run any of:
+
+```powershell
+cc
+c-code
+ccode
+```
+
 ### Download a release
 
 For most users, download a prebuilt package from the [GitHub Releases page](https://github.com/CYC-M/C-code/releases). Choose the archive matching your operating system and CPU:
