@@ -4,6 +4,54 @@ Independent fork of the Pi agent harness. Self-contained development from here o
 
 This is the home of the C-code project including our self extensible coding agent.
 
+## Installation
+
+### Download a release
+
+For most users, download a prebuilt package from the [GitHub Releases page](https://github.com/CYC-M/C-code/releases). Choose the archive matching your operating system and CPU:
+
+| Platform | Archive |
+|----------|---------|
+| macOS Apple Silicon | `pi-darwin-arm64.tar.gz` |
+| macOS Intel | `pi-darwin-x64.tar.gz` |
+| Linux x64 | `pi-linux-x64.tar.gz` |
+| Linux ARM64 | `pi-linux-arm64.tar.gz` |
+| Windows x64 | `pi-windows-x64.zip` |
+| Windows ARM64 | `pi-windows-arm64.zip` |
+
+The standalone executable is currently named `pi`. To install it as `c-code` on macOS or Linux:
+
+```bash
+tar -xzf pi-<platform>.tar.gz
+cd pi
+chmod +x pi
+sudo install pi /usr/local/bin/c-code
+c-code --help
+```
+
+On Windows, extract the ZIP, rename `pi.exe` to `c-code.exe`, and add its directory to `PATH` before running:
+
+```powershell
+c-code.exe --help
+```
+
+Release archives include the executable, runtime assets, native helpers, documentation, and a `SHA256SUMS` file. Verify the archive before extracting it when possible.
+
+### Install from source
+
+Source installation is intended for developers and requires Node.js `>=22.19.0`:
+
+```bash
+git clone https://github.com/CYC-M/C-code.git
+cd C-code
+npm ci --ignore-scripts
+npm run hydrate:model-data
+npm run build:offline
+node packages/coding-agent/dist/bundle/cli.js
+```
+
+The GitHub Actions release workflow builds the platform archives when a version tag such as `v0.0.2` is pushed. Release maintainers should run the repository release process rather than uploading binaries manually.
+
 * **[@earendil-works/pi-coding-agent](packages/coding-agent)**: Interactive coding agent CLI
 * **[@earendil-works/pi-agent-core](packages/agent)**: Agent runtime with tool calling and state management
 * **[@earendil-works/pi-ai](packages/ai)**: Unified multi-provider LLM API (OpenAI, Anthropic, Google, …)
