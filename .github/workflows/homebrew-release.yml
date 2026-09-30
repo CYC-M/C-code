@@ -38,6 +38,7 @@ jobs:
 
       - name: Build release binaries
         run: |
+          npm run hydrate:model-data
           npm run build:offline
           ./scripts/build-binaries.sh --skip-install --skip-build --out release-assets
 
