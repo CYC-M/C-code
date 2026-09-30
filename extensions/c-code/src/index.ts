@@ -43,9 +43,16 @@ export default function cCodeExtension(pi: ExtensionAPI) {
 
 	let mode: AgentMode = DEFAULT_MODE;
 	let toolsBeforePlan: string[] | undefined;
+	let modelId: string | undefined;
+	let requestRender: (() => void) | undefined;
 
 	function paintStatus(theme: { fg(name: string, text: string): string }, next: AgentMode): string {
 		return theme.fg(modeColor(next), `● ${next}`);
+	}
+
+	/** bak 式页眉状态行：`C-code · 模型 · 模式`，模式三色随 shift+tab 变。 */
+	function statusLine(theme: { fg(name: string, text: string): string }): string {
+		return `  C-code · ${modelId ?? "—"} · ${theme.fg(modeColor(mode), mode)}`;
 	}
 
 	function applyMode(ui: ModeUI, next: AgentMode): void {
@@ -121,13 +128,23 @@ export default function cCodeExtension(pi: ExtensionAPI) {
 		return undefined;
 	});
 
+	pi.on("turn_start", async (_event, ctx) => {
+		const next = ctx.model?.id;
+		if (next !== modelId) {
+			modelId = next;
+			requestRender?.();
+		}
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
+		if (ctx.model?.id) modelId = ctx.model.id;
 		if (ctx.hasUI) ctx.ui.setStatus(MODE_STATUS_KEY, paintStatus(ctx.ui.theme, mode));
 		ctx.ui.setHeader((tui, theme) => {
 			let frame = 0;
 			let timer: ReturnType<typeof setInterval> | null = null;
 			let disposed = false;
+			requestRender = () => tui.requestRender();
 			const paint = {
 				main: (text: string, row?: number) => greenMain(text, row),
 				hot: (text: string) => greenHot(text),
@@ -148,11 +165,12 @@ export default function cCodeExtension(pi: ExtensionAPI) {
 							tui.requestRender();
 						}, FRAME_MS);
 					}
-					return renderBootFrame(paint, VERSION, frame, bootScale(width));
+					return [...renderBootFrame(paint, VERSION, frame, bootScale(width)), statusLine(theme)];
 				},
 				invalidate() {},
 				dispose() {
 					disposed = true;
+					requestRender = undefined;
 					if (timer !== null) {
 						clearInterval(timer);
 						timer = null;

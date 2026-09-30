@@ -42,15 +42,15 @@ interface HeaderComponent {
 	dispose?(): void;
 }
 
-async function mountHeader() {
-	const { pi, onCalls } = stubPi();
+async function mountHeader(theme: { fg(name: string, text: string): string } = stubTheme) {
+	const { pi, onCalls, shortcuts } = stubPi();
 	cCodeExtension(pi as never);
 	const start = onCalls.find((c) => c.event === "session_start");
 	let factory: ((tui: never, theme: never) => HeaderComponent) | undefined;
 	const renders: number[] = [];
 	await start?.handler({}, { mode: "tui", ui: { setHeader: (f: typeof factory) => (factory = f) } } as never);
-	const component = factory?.({ requestRender: () => renders.push(1) } as never, stubTheme as never);
-	return { component: component as HeaderComponent, renders };
+	const component = factory?.({ requestRender: () => renders.push(1) } as never, theme as never);
+	return { component: component as HeaderComponent, renders, onCalls, shortcuts };
 }
 
 afterEach(() => {
@@ -101,6 +101,40 @@ describe("cCodeExtension", () => {
 		await vi.advanceTimersByTimeAsync(70 * 30);
 		expect(component.render(100).join("\n")).toBe(frozen);
 		expect(renders.length).toBe(count);
+	});
+
+	test("末帧行尾是 bak 式状态行 C-code · 模型 · 模式", async () => {
+		vi.useFakeTimers();
+		const { component } = await mountHeader();
+		await vi.advanceTimersByTimeAsync(70 * TOTAL_FRAMES + 20);
+		const lines = component.render(100);
+		expect(lines.at(-1)).toBe("  C-code · — · build");
+		component.dispose?.();
+	});
+
+	test("turn_start 更新模型 id 并触发重绘；模式切换着色", async () => {
+		vi.useFakeTimers();
+		const colorTheme = { fg: (name: string, text: string) => `<${name}>${text}</>` };
+		const { component, renders, onCalls, shortcuts } = await mountHeader(colorTheme);
+		const turnStart = onCalls.find((c) => c.event === "turn_start");
+		await turnStart?.handler({}, { model: { id: "kimi-k2" } } as never);
+		expect(component.render(100).at(-1)).toBe("  C-code · kimi-k2 · <accent>build</>");
+		expect(renders).toHaveLength(1);
+
+		const shortcut = shortcuts.find((s) => s.id === "shift+tab");
+		const ctx = {
+			hasUI: true,
+			ui: {
+				setStatus: () => {},
+				notify: () => {},
+				select: async () => "拒绝",
+				theme: colorTheme,
+				setTheme: () => ({ success: true }),
+			},
+		};
+		await shortcut?.handler(ctx as never); // build→yolo
+		expect(component.render(100).at(-1)).toBe("  C-code · kimi-k2 · <error>yolo</>");
+		component.dispose?.();
 	});
 });
 
