@@ -9,15 +9,20 @@ import {
 	calculateContextTokens,
 	compact,
 	DEFAULT_COMPACTION_SETTINGS,
+	effectiveKeepRecentTokens,
+	effectiveReserveTokens,
 	estimateContextTokens,
 	findCutPoint,
 	getLastAssistantUsage,
+	planToolOutputPrune,
 	prepareCompaction,
 	shouldCompact,
 } from "../src/core/compaction/index.ts";
 import {
 	buildSessionContext,
+	buildSessionProjection,
 	type CompactionEntry,
+	type ContextEditEntry,
 	type CustomMessageEntry,
 	type ModelChangeEntry,
 	migrateSessionEntries,
@@ -291,6 +296,158 @@ describe("shouldCompact", () => {
 		};
 
 		expect(shouldCompact(95000, 100000, settings)).toBe(false);
+	});
+});
+
+describe("effectiveReserveTokens", () => {
+	it("passes through without a context window or when the configured reserve fits", () => {
+		expect(effectiveReserveTokens(16384, 0, 32000)).toBe(16384);
+		expect(effectiveReserveTokens(16384, 200000, 64000)).toBe(16384);
+		expect(effectiveReserveTokens(8192, 32768, 8192)).toBe(8192);
+	});
+
+	it("clamps a disproportionate reserve to output budget plus 10% of the window", () => {
+		expect(effectiveReserveTokens(16384, 32768, 8192)).toBe(11468);
+	});
+
+	it("never lets the reserve swallow the whole window", () => {
+		// Output budget alone exceeds this window; the 10%-usable floor wins.
+		expect(effectiveReserveTokens(16384, 4096, 8192)).toBe(3687);
+	});
+});
+
+describe("effectiveKeepRecentTokens", () => {
+	it("keeps configured values the window can afford", () => {
+		expect(effectiveKeepRecentTokens(20000, 200000, 16384)).toBe(20000);
+		expect(effectiveKeepRecentTokens(6144, 32768, 8192)).toBe(6144);
+	});
+
+	it("caps at 25% of the usable region on small windows", () => {
+		expect(effectiveKeepRecentTokens(20000, 32768, 8192)).toBe(6144);
+	});
+});
+
+describe("planToolOutputPrune", () => {
+	// 32768 window → protect 8192, minimum 4096 (opencode ratio scaled down).
+	const WINDOW = 32768;
+
+	function toolCallEntry(): SessionMessageEntry {
+		return createMessageEntry({
+			...createAssistantMessage(""),
+			content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "big.txt" } }],
+			stopReason: "toolUse",
+		});
+	}
+
+	function toolResultEntry(chars: number): SessionMessageEntry {
+		return createMessageEntry({
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			content: [{ type: "text", text: "x".repeat(chars) }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+	}
+
+	/**
+	 * Newest-two-turns guard + protect window + minimum gate fixture.
+	 * Entries are created in chain order: buildSessionPath walks parentId, so
+	 * creation order must match the intended transcript order.
+	 */
+	function fourTurnFixture(): {
+		entries: SessionEntry[];
+		oldestResult: SessionMessageEntry;
+		middleResult: SessionMessageEntry;
+		newestResult: SessionMessageEntry;
+	} {
+		const entries: SessionEntry[] = [];
+		const push = <T extends SessionEntry>(entry: T): T => {
+			entries.push(entry);
+			return entry;
+		};
+		push(createMessageEntry(createUserMessage("first")));
+		push(toolCallEntry());
+		const oldestResult = push(toolResultEntry(40000)); // 10000 tokens
+		push(createMessageEntry(createUserMessage("second")));
+		push(toolCallEntry());
+		const middleResult = push(toolResultEntry(12000)); // 3000 tokens
+		push(createMessageEntry(createUserMessage("third")));
+		push(toolCallEntry());
+		const newestResult = push(toolResultEntry(20000)); // 5000 tokens
+		push(createMessageEntry(createUserMessage("fourth")));
+		push(createMessageEntry(createAssistantMessage("done")));
+		return { entries, oldestResult, middleResult, newestResult };
+	}
+
+	it("protects the newest two turns and the protect window, prunes older tool output", () => {
+		const { entries, oldestResult, middleResult, newestResult } = fourTurnFixture();
+		const plan = planToolOutputPrune(buildSessionProjection(entries).entries, WINDOW, new Set());
+
+		expect(plan.pruneProtect).toBe(8192);
+		expect(plan.minPruneTokens).toBe(4096);
+		// Newest two turns (third + fourth) are skipped entirely.
+		expect(plan.protectedTokens).toBe(3000);
+		expect(plan.targets.map((target) => target.entryId)).toEqual([oldestResult.id]);
+		expect(plan.prunableTokens).toBe(10000);
+		expect(newestResult.id).not.toBe(oldestResult.id);
+		expect(middleResult.id).not.toBe(oldestResult.id);
+	});
+
+	it("returns no targets when prunable tool output is under the minimum", () => {
+		const entries: SessionEntry[] = [];
+		const push = <T extends SessionEntry>(entry: T): T => {
+			entries.push(entry);
+			return entry;
+		};
+		push(createMessageEntry(createUserMessage("first")));
+		push(toolCallEntry());
+		const oldestResult = push(toolResultEntry(16000)); // 4000 tokens < 4096 minimum
+		push(createMessageEntry(createUserMessage("second")));
+		push(toolCallEntry());
+		push(toolResultEntry(32000)); // 8000 tokens, inside the protect window
+		push(createMessageEntry(createUserMessage("third")));
+		push(toolCallEntry());
+		push(toolResultEntry(20000));
+		push(createMessageEntry(createUserMessage("fourth")));
+		push(createMessageEntry(createAssistantMessage("done")));
+
+		const plan = planToolOutputPrune(buildSessionProjection(entries).entries, WINDOW, new Set());
+
+		expect(plan.prunableTokens).toBe(4000);
+		expect(plan.targets).toEqual([]);
+		expect(oldestResult.id).toBeTruthy();
+	});
+
+	it("stops at a tool result already replaced by a previous prune", () => {
+		const { entries, oldestResult, middleResult } = fourTurnFixture();
+		// A prior prune's context edit, appended at the branch tip (opencode frontier).
+		const edit: ContextEditEntry = {
+			type: "context_edit",
+			id: "test-id-prune-edit",
+			parentId: lastId,
+			timestamp: new Date().toISOString(),
+			targetId: middleResult.id,
+			replacement: { content: "[Tool result pruned to free context]" },
+		};
+		entries.push(edit);
+		lastId = edit.id;
+
+		const plan = planToolOutputPrune(buildSessionProjection(entries).entries, WINDOW, new Set([middleResult.id]));
+
+		// The frontier fires before the older candidate is collected.
+		expect(plan.targets).toEqual([]);
+		expect(plan.prunableTokens).toBe(0);
+		expect(plan.protectedTokens).toBe(0);
+		expect(oldestResult.id).not.toBe(middleResult.id);
+	});
+
+	it("scales the protect window with the context window", () => {
+		expect(planToolOutputPrune([], 262144, new Set()).pruneProtect).toBe(40000);
+		expect(planToolOutputPrune([], 4096, new Set()).pruneProtect).toBe(1024);
+		const empty = planToolOutputPrune([], 0, new Set());
+		expect(empty.pruneProtect).toBe(0);
+		expect(empty.targets).toEqual([]);
 	});
 });
 

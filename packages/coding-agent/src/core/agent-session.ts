@@ -68,8 +68,10 @@ import {
 	estimateProjectedContextTokens,
 	estimateTokens,
 	generateBranchSummary,
+	planToolOutputPrune,
 	prepareCompaction,
 	shouldCompact,
+	TOOL_OUTPUT_PRUNE_PLACEHOLDER,
 } from "./compaction/index.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
@@ -2735,6 +2737,43 @@ export class AgentSession {
 	}
 
 	/**
+	 * LLM-free first-level compaction: replace stale tool outputs with a placeholder
+	 * via context edits (opencode-style prune). Runs before threshold summarization so
+	 * sessions dominated by old tool output can drop under the trigger without an LLM
+	 * call. Returns true when at least one entry was edited.
+	 */
+	private _pruneOldToolOutputs(contextWindow: number): boolean {
+		const branch = this.sessionManager.getBranch();
+		const editedTargetIds = new Set(
+			branch
+				.filter((entry): entry is ContextEditEntry => entry.type === "context_edit" && entry.replacement !== null)
+				.map((entry) => entry.targetId),
+		);
+		const plan = planToolOutputPrune(
+			this.sessionManager.buildSessionProjection().entries,
+			contextWindow,
+			editedTargetIds,
+		);
+		if (plan.targets.length === 0) return false;
+
+		let edited = false;
+		for (const target of plan.targets) {
+			try {
+				const editId = this.sessionManager.appendContextEdit(target.entryId, {
+					content: TOOL_OUTPUT_PRUNE_PLACEHOLDER,
+				});
+				const entry = this.sessionManager.getEntry(editId);
+				if (entry) this._emit({ type: "entry_appended", entry });
+				edited = true;
+			} catch {
+				// Entry may have left the active branch mid-flight; keep pruning the rest.
+			}
+		}
+		if (edited) this._refreshFinalizedContext();
+		return edited;
+	}
+
+	/**
 	 * Execute threshold or overflow compaction. Manual compaction uses
 	 * `AgentSession.compact()` instead. Both paths call the lower-level `compact()`
 	 * function imported from `./compaction/index.ts` after preparation and extension
@@ -2755,6 +2794,20 @@ export class AgentSession {
 		try {
 			if (!model) {
 				return false;
+			}
+
+			// LLM-free first-level pass (opencode-style prune): clear stale tool output
+			// before paying for a summary. When it alone drops usage below the trigger,
+			// skip compaction entirely.
+			if (reason === "threshold" && this._pruneOldToolOutputs(model.contextWindow)) {
+				const prunedProjection = this.sessionManager.buildSessionProjection();
+				const prunedTokens = estimateProjectedContextTokens(
+					prunedProjection,
+					this.sessionManager.getBranch(),
+				).tokens;
+				if (!shouldCompact(prunedTokens, model.contextWindow, settings)) {
+					return false;
+				}
 			}
 
 			const pathEntries = this.sessionManager.getBranch();

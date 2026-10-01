@@ -111,6 +111,25 @@ describe("AgentSession model and extension characterization", () => {
 		expect(harness.settingsManager.getDefaultThinkingLevel()).toBe("low");
 	});
 
+	it("cycleModel with persist:true remembers the new default for the next launch", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "faux-1", name: "One", reasoning: true },
+				{ id: "faux-2", name: "Two", reasoning: true },
+			],
+			settings: {
+				defaultProvider: "faux",
+				defaultModel: "faux-1",
+			},
+		});
+		harnesses.push(harness);
+
+		await harness.session.cycleModel("forward", { persist: true });
+		expect(harness.session.model?.id).toBe("faux-2");
+		expect(harness.settingsManager.getDefaultProvider()).toBe("faux");
+		expect(harness.settingsManager.getDefaultModel()).toBe("faux-2");
+	});
+
 	it("applies per-model thinking level override on model switch", async () => {
 		const harness = await createHarness({
 			models: [

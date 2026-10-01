@@ -292,6 +292,93 @@ export function shouldCompact(contextTokens: number, contextWindow: number, sett
 }
 
 // ============================================================================
+// Tool-output pruning (LLM-free first-level compaction)
+// ============================================================================
+
+/** Replacement content written over pruned tool results via context_edit. */
+export const TOOL_OUTPUT_PRUNE_PLACEHOLDER = "[Tool result pruned to free context]";
+
+/** Newest tool output to keep untouched, capped: min(40k, 25% of window) (opencode PRUNE_PROTECT). */
+const PRUNE_PROTECT_MAX = 40_000;
+const PRUNE_PROTECT_FRACTION = 0.25;
+/** Minimum worth-pruning budget: min(20k, half the protect window) (opencode PRUNE_MINIMUM ratio). */
+const PRUNE_MINIMUM_MAX = 20_000;
+/** Newest turns whose tool output is never pruned (opencode turn guard). */
+const PRUNE_KEEP_TURNS = 2;
+
+export interface ToolOutputPruneTarget {
+	/** Message-entry id whose toolResult content gets replaced. */
+	entryId: string;
+	/** Estimated tokens freed by pruning this entry. */
+	tokens: number;
+}
+
+export interface ToolOutputPrunePlan {
+	/** Targets to replace with TOOL_OUTPUT_PRUNE_PLACEHOLDER; empty when under the minimum. */
+	targets: ToolOutputPruneTarget[];
+	/** Protected recent tool-output budget for this window. */
+	pruneProtect: number;
+	/** Minimum prunable tokens before targets are emitted. */
+	minPruneTokens: number;
+	protectedTokens: number;
+	prunableTokens: number;
+}
+
+/**
+ * Plan opencode-style tool-output pruning over the model-visible projection.
+ *
+ * Walks newest → oldest: skips the newest {@link PRUNE_KEEP_TURNS} turns entirely,
+ * protects the most recent `pruneProtect` tokens of older tool output, and
+ * collects everything beyond that as prune candidates. Stops at the first tool
+ * result already replaced by a context edit (a previous prune's frontier).
+ * Returns no targets when the prunable total is below `minPruneTokens`, so
+ * callers fall straight through to summary compaction instead of churning edits.
+ *
+ * The projection excludes pre-compaction history, so there is no explicit
+ * compaction-boundary handling.
+ */
+export function planToolOutputPrune(
+	projectedEntries: readonly ProjectedSessionEntry[],
+	contextWindow: number,
+	editedTargetIds: ReadonlySet<string>,
+): ToolOutputPrunePlan {
+	const pruneProtect = Math.min(PRUNE_PROTECT_MAX, Math.max(0, Math.floor(contextWindow * PRUNE_PROTECT_FRACTION)));
+	const minPruneTokens = Math.min(PRUNE_MINIMUM_MAX, Math.floor(pruneProtect / 2));
+	const plan: ToolOutputPrunePlan = {
+		targets: [],
+		pruneProtect,
+		minPruneTokens,
+		protectedTokens: 0,
+		prunableTokens: 0,
+	};
+	if (pruneProtect <= 0) return plan;
+
+	let turns = 0;
+	let totalToolTokens = 0;
+	for (let i = projectedEntries.length - 1; i >= 0; i--) {
+		const entry = projectedEntries[i];
+		if (entry.messages.some(isTurnStartMessage)) turns++;
+		if (turns < PRUNE_KEEP_TURNS) continue;
+		if (entry.sourceEntry.type !== "message" || entry.sourceEntry.message.role !== "toolResult") continue;
+		if (editedTargetIds.has(entry.sourceEntry.id)) break;
+		if (entry.messages.length === 0) continue;
+		const tokens = entry.messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+		if (tokens <= 0) continue;
+		totalToolTokens += tokens;
+		if (totalToolTokens <= plan.pruneProtect) {
+			plan.protectedTokens += tokens;
+			continue;
+		}
+		plan.targets.push({ entryId: entry.sourceEntry.id, tokens });
+		plan.prunableTokens += tokens;
+	}
+	if (plan.prunableTokens < plan.minPruneTokens) {
+		plan.targets = [];
+	}
+	return plan;
+}
+
+// ============================================================================
 // Cut point detection
 // ============================================================================
 

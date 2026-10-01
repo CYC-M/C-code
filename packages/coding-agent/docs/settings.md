@@ -9,7 +9,7 @@ This reference lists user-configurable settings, their types, defaults, and purp
 | Setting | Type | Default | Description |
 |---|---|---|---|
 | `defaultProvider` | string | Automatic | Startup AI provider. |
-| `defaultModel` | string | Automatic | Startup model ID. |
+| `defaultModel` | string | Automatic | Startup model ID. Saved automatically on every model switch. |
 | `defaultThinkingLevel` | `"off" \| "minimal" \| "low" \| "medium" \| "high" \| "xhigh" \| "max"` | `"medium"` | Startup thinking level. |
 | `modelThinkingLevels` | object | None | Per-model startup thinking levels keyed by exact `provider/modelId`. |
 | `thinkingBudgets` | object | Built-in budgets | Token budgets for `minimal`, `low`, `medium`, and `high` thinking levels. |

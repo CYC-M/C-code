@@ -26,7 +26,7 @@ Keep `auth.json` and any credential commands private. Project settings and exten
 
 ## Select a model
 
-Run `/model` to search available models. The picker shows models whose providers have usable authentication. Press `Ctrl+S` on a model to save it as the default for new sessions.
+Run `/model` to search available models. The picker shows models whose providers have usable authentication. Any model you select is remembered as the default for new sessions.
 
 Run `/thinking` to select the thinking level for the current model. Press `Ctrl+S` there to save the startup level. C-code limits the choices to levels supported by the selected model.
 

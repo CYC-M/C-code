@@ -4415,7 +4415,8 @@ export class InteractiveMode {
 
 	private async cycleModel(direction: "forward" | "backward"): Promise<void> {
 		try {
-			const result = await this.session.cycleModel(direction);
+			// 轮转同样记住为默认，重启后沿用。
+			const result = await this.session.cycleModel(direction, { persist: true });
 			if (result === undefined) {
 				const msg = this.session.scopedModels.length > 0 ? "Only one model in scope" : "Only one model available";
 				this.showStatus(msg);
@@ -5255,22 +5256,23 @@ export class InteractiveMode {
 
 	private showModelSelector(initialSearchInput?: string): void {
 		this.showSelector((done) => {
-			const selectModel = async (model: Model<any>, persist: boolean) => {
+			const selectModel = async (model: Model<any>) => {
 				try {
-					await this.session.setModel(model, { persist });
+					// 切换即记住：任何入口选中的模型都写成默认，下次启动沿用。
+					await this.session.setModel(model, { persist: true });
 					this.updateAvailableProviderCount();
 					this.footer.invalidate();
 					this.updateEditorBorderColor();
 					done();
-					this.showStatus(persist ? `Default model: ${model.provider}/${model.id}` : `Model: ${model.id}`);
+					this.showStatus(`Default model: ${model.provider}/${model.id}`);
 					void this.maybeWarnAboutAnthropicSubscriptionAuth(model);
 				} catch (error) {
 					done();
 					this.showError(error instanceof Error ? error.message : String(error));
 				}
 			};
-			// opencode 式：选中无 Key 的模型 → 现场填 Key → 保存成功才切换。
-			const authenticateForModel = async (model: Model<any>, persist: boolean) => {
+			// opencode 式：选中无 Key 的模型 → 现场填 Key → 保存成功才切换（同样记住为默认）。
+			const authenticateForModel = async (model: Model<any>) => {
 				const providerOptions = this.findLoginProviderOptions(model.provider);
 				const apiKeyOption = providerOptions.find(
 					(option) => option.authType === "api_key" && option.method?.login,
@@ -5297,7 +5299,7 @@ export class InteractiveMode {
 					this.showStatus("Key 未保存，模型未切换");
 					return;
 				}
-				await selectModel(model, persist);
+				await selectModel(model);
 			};
 			const defaultProvider = this.settingsManager.getDefaultProvider();
 			const defaultModel = this.settingsManager.getDefaultModel();
@@ -5306,15 +5308,15 @@ export class InteractiveMode {
 				this.session.model,
 				this.session.modelRuntime,
 				this.session.scopedModels,
-				(model) => selectModel(model, false),
+				(model) => selectModel(model),
 				() => {
 					done();
 					this.ui.requestRender();
 				},
 				initialSearchInput,
-				(model) => selectModel(model, true),
+				(model) => selectModel(model),
 				defaultProvider && defaultModel ? { provider: defaultProvider, id: defaultModel } : undefined,
-				(model, persist) => authenticateForModel(model, persist),
+				(model) => authenticateForModel(model),
 			);
 			return { component: selector, focus: selector, dispose: () => selector.dispose() };
 		});

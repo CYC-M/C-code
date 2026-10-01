@@ -82,6 +82,49 @@ export function formatFileOperations(readFiles: string[], modifiedFiles: string[
 }
 
 // ============================================================================
+// Adaptive token budgets for small context windows
+// ============================================================================
+
+/**
+ * Clamp the configured reserveTokens against the model's real window and output
+ * budget so `contextWindow - reserve` always leaves usable room (opencode's
+ * `usable()` reserves output room too). Small local models (e.g. a 32k Ollama
+ * window with the built-in 16384 reserve) would otherwise either compact
+ * constantly or reserve the whole window. Cloud-sized configs where the
+ * configured reserve already fits under `maxTokens + 10%` pass through unchanged.
+ */
+export function effectiveReserveTokens(
+	reserveTokens: number,
+	contextWindow: number,
+	maxTokens: number | undefined,
+): number {
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) return reserveTokens;
+	const outputBudget =
+		(maxTokens !== undefined && maxTokens > 0 ? maxTokens : Math.floor(contextWindow / 4)) +
+		Math.floor(contextWindow * 0.1);
+	const usableFloor = Math.max(Math.floor(contextWindow * 0.1), 1);
+	return Math.min(reserveTokens, outputBudget, contextWindow - usableFloor);
+}
+
+/**
+ * Cap keepRecentTokens so summary + kept tail still fit below the compaction
+ * trigger. Mirrors opencode's preserve_recent budget (25% of usable, floor 2048)
+ * but keeps larger configured values when the window can afford them. Prevents
+ * compact → immediately-compact-again loops on small windows where the built-in
+ * 20000 keep-recent exceeds the usable region.
+ */
+export function effectiveKeepRecentTokens(
+	keepRecentTokens: number,
+	contextWindow: number,
+	effectiveReserve: number,
+): number {
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) return keepRecentTokens;
+	const usable = contextWindow - effectiveReserve;
+	if (usable <= 0) return keepRecentTokens;
+	return Math.min(keepRecentTokens, Math.max(2048, Math.floor(usable * 0.25)));
+}
+
+// ============================================================================
 // Message Serialization
 // ============================================================================
 

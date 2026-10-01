@@ -42,6 +42,31 @@ describe("compaction model overrides", () => {
 		expect(manager.getCompactionSettings(model)).toEqual({ ...defaults, keepRecentTokens: 1024 });
 	});
 
+	it("adapts token budgets to the model's context window", () => {
+		const manager = SettingsManager.inMemory();
+		const small = { provider: "provider", id: "small", contextWindow: 32768, maxTokens: 8192 };
+		expect(manager.getCompactionSettings(small)).toEqual({
+			enabled: true,
+			reserveTokens: 11468,
+			keepRecentTokens: 5325,
+		});
+		// Cloud-sized windows keep the configured defaults unchanged.
+		const big = { provider: "provider", id: "big", contextWindow: 200000, maxTokens: 64000 };
+		expect(manager.getCompactionSettings(big)).toEqual(defaults);
+	});
+
+	it("keeps model overrides that already fit the window", () => {
+		const manager = SettingsManager.inMemory({
+			compaction: { modelOverrides: { "provider/small": { reserveTokens: 8192, keepRecentTokens: 6144 } } },
+		});
+		const small = { provider: "provider", id: "small", contextWindow: 32768, maxTokens: 8192 };
+		expect(manager.getCompactionSettings(small)).toEqual({
+			enabled: true,
+			reserveTokens: 8192,
+			keepRecentTokens: 6144,
+		});
+	});
+
 	it("matches exact provider/model IDs, including IDs containing slashes", () => {
 		const manager = SettingsManager.inMemory({
 			compaction: {

@@ -8,6 +8,7 @@ import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
+import { effectiveKeepRecentTokens, effectiveReserveTokens } from "./compaction/utils.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
 import type { RoleModelRef } from "./teamwork/types.ts";
 
@@ -895,16 +896,33 @@ export class SettingsManager {
 		return this.getCompactionTokenSetting("keepRecentTokens", model);
 	}
 
-	/** Resolve each token setting through model override, ordinary setting, then built-in default. */
-	getCompactionSettings(model?: Pick<Model<string>, "provider" | "id">): {
+	/**
+	 * Resolve each token setting through model override, ordinary setting, then built-in default.
+	 *
+	 * reserveTokens/keepRecentTokens are additionally clamped against the model's
+	 * contextWindow/maxTokens when available (see effectiveReserveTokens), so small
+	 * local windows cannot end up with a reserve that swallows the whole window or a
+	 * keep-recent budget that forces a compaction loop. Individual getters return the
+	 * raw configured values.
+	 */
+	getCompactionSettings(
+		model?: Pick<Model<string>, "provider" | "id"> & Partial<Pick<Model<string>, "contextWindow" | "maxTokens">>,
+	): {
 		enabled: boolean;
 		reserveTokens: number;
 		keepRecentTokens: number;
 	} {
+		const configuredReserve = this.getCompactionReserveTokens(model);
+		const contextWindow = model?.contextWindow ?? 0;
+		const reserveTokens = effectiveReserveTokens(configuredReserve, contextWindow, model?.maxTokens);
 		return {
 			enabled: this.getCompactionEnabled(),
-			reserveTokens: this.getCompactionReserveTokens(model),
-			keepRecentTokens: this.getCompactionKeepRecentTokens(model),
+			reserveTokens,
+			keepRecentTokens: effectiveKeepRecentTokens(
+				this.getCompactionKeepRecentTokens(model),
+				contextWindow,
+				reserveTokens,
+			),
 		};
 	}
 
