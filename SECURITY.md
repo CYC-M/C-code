@@ -24,7 +24,7 @@ coding agent, and this cannot be protected against.
 If you believe you found a security vulnerability in C-code or another package in
 this repository, please report it privately by either:
 
-- Emailing `2330699794@qq.com`, or
+- Emailing `2330699794@qq.com`
 - Opening a private report through GitHub Security Advisories for this repository
 
 Please include:
