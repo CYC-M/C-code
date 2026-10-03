@@ -52,7 +52,7 @@ describe("teamwork side assembly", () => {
 		const flat = text.replace(/[│↻\s]/g, "");
 		expect(flat).toContain("worker-a(ollama/qwen3.5:9b-q4_K_M·medium)");
 		expect(flat).toContain("xiaomi-token-plan-cn/mimo-v2.6-flash·off");
-		expect(flat).toContain("(ollama)qwen3.5:9b-q4_K_M·medium");
+		expect(flat).not.toContain("(ollama)qwen3.5:9b-q4_K_M·medium");
 		expect(text).not.toContain("...");
 	});
 });

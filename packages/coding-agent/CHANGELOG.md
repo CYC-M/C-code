@@ -13,6 +13,7 @@
 
 - Changed teamwork worker naming to `worker1`, `worker2`, ... with the job in parentheses (`worker1（UI designer）`); unknown names become the description of the next free worker instead of failing the run.
 - Changed the teamwork sidebar to wrap values and fold workers by the available height, and to take a share of the terminal width (30-46 columns) instead of a fixed 40.
+- Changed the teamwork sidebar to tint titles and plain values with the plan/build/yolo mode color, and removed the model section (the mode row stays).
 
 ### Fixed
 

@@ -143,6 +143,15 @@ export function isLampStatusLine(text: string): boolean {
 	return text.replace(ANSI_PATTERN, "").startsWith("●");
 }
 
+/**
+ * Rows already carrying ANSI (MCP lamps, ● status lines) keep their own
+ * semantic colors and are never re-tinted with the mode accent.
+ */
+function hasAnsiCodes(text: string): boolean {
+	ANSI_PATTERN.lastIndex = 0;
+	return ANSI_PATTERN.test(text);
+}
+
 /** Fold indicator for workers hidden by the height budget. */
 function workerFoldRow(hidden: number, hiddenActive = false): TeamworkSidebarRow {
 	if (hiddenActive) return { text: `…${hidden} more ●`, active: true, dim: false };
@@ -221,8 +230,6 @@ export function formatTeamworkSidebarSections(data: TeamworkSidebarData): Teamwo
 		{ text: `· ${data.sessionLine}`, active: false },
 		{ text: "Context", active: false, title: true },
 		{ text: `· ${data.contextLine}`, active: false },
-		{ text: "模型", active: false, title: true },
-		{ text: `· ${data.modelLine}`, active: false },
 		...(data.agentMode === undefined
 			? []
 			: [
@@ -383,15 +390,17 @@ export class TeamworkSidebarComponent extends VStack {
 				? text.replace(/●?$/, `${SPIN_FRAMES[this.spinFrame % SPIN_FRAMES.length]}`)
 				: text.replace(/^· /, `${SPIN_FRAMES[this.spinFrame % SPIN_FRAMES.length]} `);
 		}
-		const styled = row.active
-			? theme.bold(theme.fg("accent", text))
-			: row.mode !== undefined
-				? theme.fg(modeColorToken(row.mode), text)
-				: row.title
-					? theme.fg("accent", text)
-					: row.dim
-						? theme.fg("dim", text)
-						: text;
+		// Mode-aware sidebar (plan/build/yolo): titles and plain value rows follow
+		// the mode accent; dim placeholders, semantic colors, and pre-styled
+		// (ANSI-carrying) rows are left alone.
+		const modeAware = this.currentData?.agentMode !== undefined;
+		let styled: string;
+		if (row.active) styled = theme.bold(theme.fg("accent", text));
+		else if (row.mode !== undefined) styled = theme.fg(modeColorToken(row.mode), text);
+		else if (row.title) styled = theme.fg("accent", text);
+		else if (row.dim) styled = theme.fg("dim", text);
+		else if (modeAware && !hasAnsiCodes(text)) styled = theme.fg("accent", text);
+		else styled = text;
 		const clickable = row.role !== undefined && this.onSelectRole !== undefined;
 		const inner = Math.max(MIN_INNER_WIDTH, width - GUTTER.length - (clickable ? 2 : 0));
 		const wrapped = wrapTextWithAnsi(styled, inner);
@@ -402,7 +411,9 @@ export class TeamworkSidebarComponent extends VStack {
 			const isLast = index === wrapped.length - 1;
 			const body = isLast && clickable ? `${line} ${theme.fg("dim", "↻")}` : line;
 			// Indent continuations under the bullet so a wrapped value reads as one item.
-			return `${index === 0 ? GUTTER : GUTTER_CONTINUATION}${body}`;
+			const plain = index === 0 ? GUTTER : GUTTER_CONTINUATION;
+			const gutter = modeAware ? theme.fg("accent", plain) : plain;
+			return `${gutter}${body}`;
 		});
 	}
 

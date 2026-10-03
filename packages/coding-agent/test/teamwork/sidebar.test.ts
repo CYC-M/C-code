@@ -33,8 +33,6 @@ describe("teamwork sidebar formatTeamworkSidebarRows", () => {
 			"· my-session (main)",
 			"Context",
 			"· 12.4k tokens · 20% used",
-			"模型",
-			"· (ollama) qwen3.5:9b · medium",
 			"Leader",
 			"· x/lead · off",
 			"Workers",
@@ -45,6 +43,13 @@ describe("teamwork sidebar formatTeamworkSidebarRows", () => {
 			"MCP",
 			"○ 未配置（对话说“接上 originkit”）",
 		]);
+	});
+
+	it("renders no model section but keeps the mode row when the mode is known", () => {
+		const lines = formatTeamworkSidebarRows({ ...base, agentMode: "build" }).map((row) => row.text);
+		expect(lines).not.toContain("模型");
+		expect(lines).toContain("模式");
+		expect(lines).toContain("· ● build");
 	});
 
 	it("hides the run row while idle instead of showing a placeholder under Reviewer", () => {
@@ -407,12 +412,12 @@ describe("teamwork sidebar brand row", () => {
 		sidebar.dispose();
 	});
 
-	it("keeps model info visible in the narrow column without hints crowding it", () => {
-		const longModel = "(very-long-provider-name) extremely-long-model-id-that-must-stay-visible · high";
+	it("keeps session info visible in the narrow column without hints crowding it", () => {
+		const longSession = "a-very-long-session-name-that-must-stay-visible (main)";
 		const sidebar = new TeamworkSidebarComponent({ requestRender: () => {} } as never, {
-			sessionLine: "s",
+			sessionLine: longSession,
 			contextLine: "c",
-			modelLine: longModel,
+			modelLine: "unused",
 			roleModels: undefined,
 			sessionModel: { provider: "o", id: "s" },
 			spinning: false,
@@ -421,10 +426,11 @@ describe("teamwork sidebar brand row", () => {
 			.render(30)
 			.join("\n")
 			.replace(/\u001b\[[0-9;]*m/g, "");
-		// Model value wraps instead of being truncated away.
-		expect(text).toContain("模型");
-		expect(text.replace(/[│\s]/g, "")).toContain("extremely-long-model-id-that-must-stay-visible".replace(/\s/g, ""));
-		// Narrow column drops the hints row to save height for model/session content.
+		// Session value wraps instead of being truncated away; the model section is gone.
+		expect(text).toContain("会话");
+		expect(text).not.toContain("模型");
+		expect(text.replace(/[│\s]/g, "")).toContain("a-very-long-session-name-that-must-stay-visible(main)");
+		// Narrow column drops the hints row to save height for session content.
 		expect(text).not.toContain("双Esc退出");
 		sidebar.dispose();
 	});
@@ -455,7 +461,7 @@ describe("teamwork sidebar brand row", () => {
 			const flat = text.replace(/[│↻\s]/g, "");
 			expect(flat).toContain("worker-a(ollama/qwen3.5:9b-q4_K_M·medium)");
 			expect(flat).toContain("xiaomi-token-plan-cn/mimo-v2.6-flash·off");
-			expect(flat).toContain("(ollama)qwen3.5:9b-q4_K_M·medium");
+			expect(flat).not.toContain("(ollama)qwen3.5:9b-q4_K_M·medium");
 			expect(text).not.toContain("...");
 			sidebar.dispose();
 		}
@@ -520,5 +526,48 @@ describe("teamwork sidebar agent mode", () => {
 		const fold = rows.find((row) => row.text.startsWith("…"));
 		expect(fold?.active).toBe(true);
 		expect(fold?.text).toContain("●");
+	});
+});
+
+describe("teamwork sidebar mode-aware tint", () => {
+	function makeValueData(agentMode?: "plan" | "build" | "yolo") {
+		return {
+			sessionLine: "s",
+			contextLine: "c",
+			modelLine: "unused",
+			roleModels: { leader: { provider: "o", model: "m" } },
+			sessionModel: { provider: "o", id: "s" },
+			spinning: false,
+			...(agentMode === undefined ? {} : { agentMode }),
+		};
+	}
+
+	it("tints plain value rows when the mode is known", () => {
+		const sidebar = new TeamworkSidebarComponent({ requestRender: () => {} } as never, makeValueData("yolo"));
+		const raw = sidebar.render(60).join("\n");
+		const stripped = raw.replace(/\u001b\[[0-9;]*m/g, "");
+		expect(stripped).toContain("· s");
+		const sessionLine = raw.split("\n").find((line) => line.replace(/\u001b\[[0-9;]*m/g, "").includes("· s"));
+		expect(sessionLine).toContain("\u001b");
+		sidebar.dispose();
+	});
+
+	it("leaves plain value rows untinted without a mode", () => {
+		const sidebar = new TeamworkSidebarComponent({ requestRender: () => {} } as never, makeValueData());
+		const raw = sidebar.render(60).join("\n");
+		const sessionLine = raw.split("\n").find((line) => line.includes("· s"));
+		expect(sessionLine).not.toContain("\u001b");
+		sidebar.dispose();
+	});
+
+	it("keeps pre-styled lamp rows on their own colors", () => {
+		const sidebar = new TeamworkSidebarComponent({ requestRender: () => {} } as never, {
+			...makeValueData("build"),
+			mcpServers: [{ name: "originkit", state: "ok", toolCount: 4 }],
+		});
+		const raw = sidebar.render(60).join("\n");
+		const stripped = raw.replace(/\u001b\[[0-9;]*m/g, "");
+		expect(stripped).toContain("originkit 4 tools");
+		sidebar.dispose();
 	});
 });
