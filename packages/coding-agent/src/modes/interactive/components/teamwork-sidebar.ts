@@ -46,13 +46,6 @@ export interface TeamworkSidebarData {
 	spinning: boolean;
 	/** Live per-member statuses from the run panel. Absent while idle. */
 	statuses?: TeamworkMemberStatuses;
-	/**
-	 * Agent mode driving the sidebar accent (plan/build/yolo from the c-code
-	 * extension themes). When present a dedicated `模式` row is rendered so the
-	 * sidebar text stays in sync with the footer even if extension lines are
-	 * sliced away. Absent for callers that do not track a mode.
-	 */
-	agentMode?: "plan" | "build" | "yolo";
 }
 
 /** Worker rows shown when the available height is unknown. */
@@ -116,11 +109,6 @@ export interface TeamworkSidebarRow {
 	title?: boolean;
 	dim?: boolean;
 	/**
-	 * Agent mode for the dedicated `模式` value row. Renders in the mode color
-	 * (plan黄/build绿/yolo红) so the text matches the sidebar accent.
-	 */
-	mode?: "plan" | "build" | "yolo";
-	/**
 	 * Secondary content that may be shed when the height budget is tight:
 	 * extension statuses first, then the remaining keyed rows (run, MCP).
 	 * The roster always wins.
@@ -143,37 +131,10 @@ export function isLampStatusLine(text: string): boolean {
 	return text.replace(ANSI_PATTERN, "").startsWith("●");
 }
 
-/**
- * Rows already carrying ANSI (MCP lamps, ● status lines) keep their own
- * semantic colors and are never re-tinted with the mode accent.
- */
-function hasAnsiCodes(text: string): boolean {
-	ANSI_PATTERN.lastIndex = 0;
-	return ANSI_PATTERN.test(text);
-}
-
 /** Fold indicator for workers hidden by the height budget. */
 function workerFoldRow(hidden: number, hiddenActive = false): TeamworkSidebarRow {
 	if (hiddenActive) return { text: `…${hidden} more ●`, active: true, dim: false };
 	return { text: `…${hidden} more`, active: false, dim: true };
-}
-
-/** Mode value color token: plan黄 / build绿 / yolo红，与 c-code 主题 accent 保持一致。 */
-function modeColorToken(mode: "plan" | "build" | "yolo"): "warning" | "accent" | "error" {
-	if (mode === "plan") return "warning";
-	if (mode === "yolo") return "error";
-	return "accent";
-}
-
-/**
- * c-code 三模式主题到 sidebar 模式行的映射：c-code-yellow→plan，
- * c-code-green→build，c-code-red→yolo。未知主题返回 undefined（不渲染模式行）。
- */
-export function teamworkAgentModeFromTheme(themeName: string | undefined): "plan" | "build" | "yolo" | undefined {
-	if (themeName === "c-code-yellow") return "plan";
-	if (themeName === "c-code-green") return "build";
-	if (themeName === "c-code-red") return "yolo";
-	return undefined;
 }
 
 export interface TeamworkSidebarSections {
@@ -196,13 +157,18 @@ export function sidebarWorkerRoles(data: TeamworkSidebarData): string[] {
 /**
  * One sidebar row per core MCP server. The `●` lamp leads the row (green =
  * healthy, red = problem, dim = transitional) so it sits at the left edge.
+ * Error rows carry the (secret-free) reason so the sidebar alone is enough
+ * to tell a missing key from a network or auth failure.
  */
 export function formatMcpServerRow(server: McpServerStatus): string {
 	switch (server.state) {
 		case "ok":
 			return `${theme.fg("success", "●")} ${server.name} ${server.toolCount} tools`;
-		case "err":
-			return `${theme.fg("error", "●")} ${server.name} err`;
+		case "err": {
+			const reason = server.error?.trim();
+			const suffix = reason ? `: ${reason.slice(0, 80)}` : "";
+			return `${theme.fg("error", "●")} ${server.name} err${suffix}`;
+		}
 		case "connecting":
 			return `${theme.fg("dim", "●")} ${server.name} connecting`;
 		case "off":
@@ -230,12 +196,6 @@ export function formatTeamworkSidebarSections(data: TeamworkSidebarData): Teamwo
 		{ text: `· ${data.sessionLine}`, active: false },
 		{ text: "Context", active: false, title: true },
 		{ text: `· ${data.contextLine}`, active: false },
-		...(data.agentMode === undefined
-			? []
-			: [
-					{ text: "模式", active: false, title: true },
-					{ text: `· ● ${data.agentMode}`, active: false, mode: data.agentMode },
-				]),
 		{ text: "Leader", active: false, title: true },
 		{ text: `· ${formatSidebarBinding(leader)}`, active: isActive("leader"), role: "leader" },
 		{ text: "Workers", active: false, title: true },
@@ -390,17 +350,15 @@ export class TeamworkSidebarComponent extends VStack {
 				? text.replace(/●?$/, `${SPIN_FRAMES[this.spinFrame % SPIN_FRAMES.length]}`)
 				: text.replace(/^· /, `${SPIN_FRAMES[this.spinFrame % SPIN_FRAMES.length]} `);
 		}
-		// Mode-aware sidebar (plan/build/yolo): titles and plain value rows follow
-		// the mode accent; dim placeholders, semantic colors, and pre-styled
-		// (ANSI-carrying) rows are left alone.
-		const modeAware = this.currentData?.agentMode !== undefined;
-		let styled: string;
-		if (row.active) styled = theme.bold(theme.fg("accent", text));
-		else if (row.mode !== undefined) styled = theme.fg(modeColorToken(row.mode), text);
-		else if (row.title) styled = theme.fg("accent", text);
-		else if (row.dim) styled = theme.fg("dim", text);
-		else if (modeAware && !hasAnsiCodes(text)) styled = theme.fg("accent", text);
-		else styled = text;
+		// Titles follow the mode accent (plan黄/build绿/yolo红 via the active
+		// theme); values stay default text so working rows stand out.
+		const styled = row.active
+			? theme.bold(theme.fg("accent", text))
+			: row.title
+				? theme.fg("accent", text)
+				: row.dim
+					? theme.fg("dim", text)
+					: text;
 		const clickable = row.role !== undefined && this.onSelectRole !== undefined;
 		const inner = Math.max(MIN_INNER_WIDTH, width - GUTTER.length - (clickable ? 2 : 0));
 		const wrapped = wrapTextWithAnsi(styled, inner);
@@ -411,9 +369,7 @@ export class TeamworkSidebarComponent extends VStack {
 			const isLast = index === wrapped.length - 1;
 			const body = isLast && clickable ? `${line} ${theme.fg("dim", "↻")}` : line;
 			// Indent continuations under the bullet so a wrapped value reads as one item.
-			const plain = index === 0 ? GUTTER : GUTTER_CONTINUATION;
-			const gutter = modeAware ? theme.fg("accent", plain) : plain;
-			return `${gutter}${body}`;
+			return `${index === 0 ? GUTTER : GUTTER_CONTINUATION}${body}`;
 		});
 	}
 

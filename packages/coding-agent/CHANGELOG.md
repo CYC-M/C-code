@@ -13,13 +13,14 @@
 
 - Changed teamwork worker naming to `worker1`, `worker2`, ... with the job in parentheses (`worker1（UI designer）`); unknown names become the description of the next free worker instead of failing the run.
 - Changed the teamwork sidebar to wrap values and fold workers by the available height, and to take a share of the terminal width (30-46 columns) instead of a fixed 40.
-- Changed the teamwork sidebar to tint titles and plain values with the plan/build/yolo mode color, and removed the model section (the mode row stays).
+- Changed the teamwork sidebar to tint titles with the plan/build/yolo mode color, and removed the model section.
 
 ### Fixed
 
 - Fixed `/teamwork` runs failing with `unknown role` when the leader named a worker that had no model binding.
-- Fixed the teamwork sidebar keeping the previous plan/build/yolo color and model text after a mode switch: it now rebuilds on theme and extension-status changes and renders a dedicated mode row.
+- Fixed the teamwork sidebar keeping the previous plan/build/yolo color after a mode switch: titles now rebuild on theme and extension-status changes.
 - Fixed leader/worker/reviewer working indicators being invisible: active rows now render the spinning frame in accent bold, and the fold row lights up when hidden workers are working.
+- Fixed MCP sidebar err rows showing a bare `err`: they now carry the secret-free reason so a missing key is distinguishable from network or auth failures.
 
 ## [0.87.1] - 2026-09-22
 

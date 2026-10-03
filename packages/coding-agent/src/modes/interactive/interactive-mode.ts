@@ -169,7 +169,6 @@ import {
 	formatMcpServerRow,
 	TeamworkSidebarComponent,
 	type TeamworkSidebarData,
-	teamworkAgentModeFromTheme,
 	toTeamworkMemberStatuses,
 } from "./components/teamwork-sidebar.ts";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.ts";
@@ -196,7 +195,6 @@ import {
 import {
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
-	getCurrentThemeName,
 	getEditorTheme,
 	getMarkdownTheme,
 	getThemeByName,
@@ -5283,12 +5281,10 @@ export class InteractiveMode {
 		const snapshot = this.teamworkPanel?.getSnapshot();
 		const workerDescriptions = this.teamworkWorkerDescriptions();
 		const mcpSnapshot = this.session.getMcpSnapshot();
-		const agentMode = teamworkAgentModeFromTheme(getCurrentThemeName());
 		return {
 			sessionLine,
 			contextLine,
 			modelLine,
-			...(agentMode === undefined ? {} : { agentMode }),
 			roleModels: this.settingsManager.getRoleModels(),
 			sessionModel: {
 				provider: this.session.model?.provider ?? "?",

@@ -823,11 +823,6 @@ export function onThemeChange(callback: () => void): void {
 	onThemeChangeCallback = callback;
 }
 
-/** Currently active theme name, for UI that derives state from the theme (e.g. agent mode colors). */
-export function getCurrentThemeName(): string | undefined {
-	return currentThemeName;
-}
-
 function startThemeWatcher(): void {
 	stopThemeWatcher();
 

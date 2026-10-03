@@ -3,7 +3,6 @@ import {
 	formatMcpServerRow,
 	formatTeamworkSidebarRows,
 	TeamworkSidebarComponent,
-	teamworkAgentModeFromTheme,
 	toTeamworkMemberStatuses,
 } from "../../src/modes/interactive/components/teamwork-sidebar.ts";
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
@@ -45,11 +44,10 @@ describe("teamwork sidebar formatTeamworkSidebarRows", () => {
 		]);
 	});
 
-	it("renders no model section but keeps the mode row when the mode is known", () => {
-		const lines = formatTeamworkSidebarRows({ ...base, agentMode: "build" }).map((row) => row.text);
+	it("renders neither a model nor a mode section", () => {
+		const lines = formatTeamworkSidebarRows(base).map((row) => row.text);
 		expect(lines).not.toContain("模型");
-		expect(lines).toContain("模式");
-		expect(lines).toContain("· ● build");
+		expect(lines).not.toContain("模式");
 	});
 
 	it("hides the run row while idle instead of showing a placeholder under Reviewer", () => {
@@ -187,10 +185,22 @@ describe("teamwork sidebar formatTeamworkSidebarRows", () => {
 		expect(formatMcpServerRow({ name: "o", state: "ok", toolCount: 2 })).toContain("o 2 tools");
 		expect(
 			formatMcpServerRow({ name: "o", state: "err", toolCount: 0 })
-				.replace(/\u001b\[[0-9;]*m/g, "")
+				.replace(/\[[0-9;]*m/g, "")
 				.startsWith("●"),
 		).toBe(true);
 		expect(formatMcpServerRow({ name: "o", state: "connecting", toolCount: 0 })).toContain("connecting");
+	});
+
+	it("shows the MCP error reason on err rows instead of a bare err", () => {
+		const withReason = formatMcpServerRow({
+			name: "originkit",
+			state: "err",
+			toolCount: 0,
+			error: "missing ORIGINKIT_API_KEY",
+		}).replace(/\[[0-9;]*m/g, "");
+		expect(withReason).toContain("originkit err: missing ORIGINKIT_API_KEY");
+		const withoutReason = formatMcpServerRow({ name: "o", state: "err", toolCount: 0 }).replace(/\[[0-9;]*m/g, "");
+		expect(withoutReason).toBe("● o err");
 	});
 });
 
@@ -468,23 +478,7 @@ describe("teamwork sidebar brand row", () => {
 	});
 });
 
-describe("teamwork sidebar agent mode", () => {
-	it("maps c-code themes to plan/build/yolo", () => {
-		expect(teamworkAgentModeFromTheme("c-code-yellow")).toBe("plan");
-		expect(teamworkAgentModeFromTheme("c-code-green")).toBe("build");
-		expect(teamworkAgentModeFromTheme("c-code-red")).toBe("yolo");
-		expect(teamworkAgentModeFromTheme("dark")).toBeUndefined();
-		expect(teamworkAgentModeFromTheme(undefined)).toBeUndefined();
-	});
-
-	it("renders a dedicated mode row only when the mode is known", () => {
-		const withMode = formatTeamworkSidebarRows({ ...base, agentMode: "yolo" }).map((row) => row.text);
-		expect(withMode).toContain("模式");
-		expect(withMode).toContain("· ● yolo");
-		const withoutMode = formatTeamworkSidebarRows(base).map((row) => row.text);
-		expect(withoutMode).not.toContain("模式");
-	});
-
+describe("teamwork sidebar working indicators", () => {
 	it("highlights working rows with accent so the lamp is visible", () => {
 		const sidebar = new TeamworkSidebarComponent({ requestRender: () => {} } as never, {
 			sessionLine: "s",
@@ -526,48 +520,5 @@ describe("teamwork sidebar agent mode", () => {
 		const fold = rows.find((row) => row.text.startsWith("…"));
 		expect(fold?.active).toBe(true);
 		expect(fold?.text).toContain("●");
-	});
-});
-
-describe("teamwork sidebar mode-aware tint", () => {
-	function makeValueData(agentMode?: "plan" | "build" | "yolo") {
-		return {
-			sessionLine: "s",
-			contextLine: "c",
-			modelLine: "unused",
-			roleModels: { leader: { provider: "o", model: "m" } },
-			sessionModel: { provider: "o", id: "s" },
-			spinning: false,
-			...(agentMode === undefined ? {} : { agentMode }),
-		};
-	}
-
-	it("tints plain value rows when the mode is known", () => {
-		const sidebar = new TeamworkSidebarComponent({ requestRender: () => {} } as never, makeValueData("yolo"));
-		const raw = sidebar.render(60).join("\n");
-		const stripped = raw.replace(/\u001b\[[0-9;]*m/g, "");
-		expect(stripped).toContain("· s");
-		const sessionLine = raw.split("\n").find((line) => line.replace(/\u001b\[[0-9;]*m/g, "").includes("· s"));
-		expect(sessionLine).toContain("\u001b");
-		sidebar.dispose();
-	});
-
-	it("leaves plain value rows untinted without a mode", () => {
-		const sidebar = new TeamworkSidebarComponent({ requestRender: () => {} } as never, makeValueData());
-		const raw = sidebar.render(60).join("\n");
-		const sessionLine = raw.split("\n").find((line) => line.includes("· s"));
-		expect(sessionLine).not.toContain("\u001b");
-		sidebar.dispose();
-	});
-
-	it("keeps pre-styled lamp rows on their own colors", () => {
-		const sidebar = new TeamworkSidebarComponent({ requestRender: () => {} } as never, {
-			...makeValueData("build"),
-			mcpServers: [{ name: "originkit", state: "ok", toolCount: 4 }],
-		});
-		const raw = sidebar.render(60).join("\n");
-		const stripped = raw.replace(/\u001b\[[0-9;]*m/g, "");
-		expect(stripped).toContain("originkit 4 tools");
-		sidebar.dispose();
 	});
 });
