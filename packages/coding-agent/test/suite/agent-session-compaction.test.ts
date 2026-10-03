@@ -535,7 +535,9 @@ describe("AgentSession compaction characterization", () => {
 			await harness.session.prompt("run the large tool");
 
 			expect(order.slice(0, 2)).toEqual(["compaction", "provider"]);
-			expect(observedSettings[0]).toEqual({ enabled: true, reserveTokens: 400, keepRecentTokens: 1750 });
+			// The configured 400 clamps through effectiveReserveTokens: this model reserves
+			// maxTokens (100) plus 10% of its 2600-token window, leaving 360.
+			expect(observedSettings[0]).toEqual({ enabled: true, reserveTokens: 360, keepRecentTokens: 1750 });
 			expect(harness.eventsOfType("agent_start")).toHaveLength(agentStartsBefore + 1);
 			expect(harness.eventsOfType("compaction_start").at(-1)).toEqual({
 				type: "compaction_start",

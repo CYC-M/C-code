@@ -208,10 +208,18 @@ export class FooterComponent implements Component {
 			const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
 			statsLine = statsLeft + padding + rightSide;
 		} else {
-			// Need to truncate right side
+			// Need to truncate right side: drop the provider prefix first so the
+			// model id stays visible, then mark the cut with an ellipsis.
 			const availableForRight = width - statsLeftWidth - minPadding;
+			let truncatable = rightSide;
+			if (truncatable !== rightSideWithoutProvider) {
+				const withoutProviderNeeded = statsLeftWidth + minPadding + visibleWidth(rightSideWithoutProvider);
+				if (withoutProviderNeeded > width || visibleWidth(truncatable) > availableForRight) {
+					truncatable = rightSideWithoutProvider;
+				}
+			}
 			if (availableForRight > 0) {
-				const truncatedRight = truncateToWidth(rightSide, availableForRight, "");
+				const truncatedRight = truncateToWidth(truncatable, availableForRight, "…");
 				const truncatedRightWidth = visibleWidth(truncatedRight);
 				const padding = " ".repeat(Math.max(0, width - statsLeftWidth - truncatedRightWidth));
 				statsLine = statsLeft + padding + truncatedRight;

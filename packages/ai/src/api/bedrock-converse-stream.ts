@@ -56,6 +56,7 @@ import { providerHeadersToRecord } from "../utils/headers.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
+import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText } from "../utils/text.ts";
 import {
@@ -246,6 +247,9 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
 
 		try {
 			const supportsStrictMode = model.compat?.supportsStrictMode ?? false;
+			// The SDK retry strategy sleeps without observing the request AbortSignal, so let
+			// the shared abortable policy in retryBedrockRequest own retries instead.
+			config.maxAttempts = 1;
 			const client = new BedrockRuntimeClient(config);
 			let observedRawResponse = false;
 			if (options.onResponse) {
@@ -283,7 +287,19 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
 			}
 			const command = new ConverseStreamCommand(commandInput);
 
-			const response = await client.send(command, { abortSignal: options.signal });
+			// `timeoutMs` becomes an abort deadline: the SDK has no transport-agnostic timeout
+			// knob, and swapping its default HTTP/2 handler for a timed HTTP/1.1 one would
+			// change the transport. A deadline composes with the caller's abort signal instead.
+			const timeoutSignal = options.timeoutMs === undefined ? undefined : AbortSignal.timeout(options.timeoutMs);
+			const requestSignal =
+				options.signal && timeoutSignal
+					? AbortSignal.any([options.signal, timeoutSignal])
+					: (options.signal ?? timeoutSignal);
+
+			const response = await retryBedrockRequest(
+				() => client.send(command, { abortSignal: requestSignal }),
+				options,
+			);
 			responseRequestId = normalizeDiagnosticValue(response.$metadata.requestId);
 			if (!observedRawResponse && response.$metadata.httpStatusCode !== undefined) {
 				const responseHeaders: Record<string, string> = {};
@@ -407,6 +423,38 @@ function formatBedrockError(error: unknown): string {
 }
 
 type SdkErrorMetadata = { $metadata?: { httpStatusCode?: unknown; requestId?: unknown } };
+
+/**
+ * Run the initial Bedrock request through the shared abortable retry policy.
+ *
+ * The SDK's own retries are disabled (`maxAttempts: 1`, set at client creation) because
+ * their backoff ignores the request AbortSignal. AWS exceptions carry the HTTP status on
+ * `$metadata` rather than the `status`/`headers` fields the shared policy inspects, so
+ * normalize the error shape before it decides whether to retry.
+ */
+function retryBedrockRequest<T>(
+	request: () => Promise<T>,
+	options?: Pick<StreamOptions, "maxRetries" | "maxRetryDelayMs" | "signal">,
+): Promise<T> {
+	return retryProviderRequest(
+		async () => {
+			try {
+				return await request();
+			} catch (error) {
+				if (error instanceof Error) {
+					const normalized = error as Error & { status?: number; headers?: Headers };
+					const metadata = (error as SdkErrorMetadata).$metadata;
+					if (normalized.status === undefined && typeof metadata?.httpStatusCode === "number") {
+						normalized.status = metadata.httpStatusCode;
+					}
+					if (!("headers" in normalized)) normalized.headers = undefined;
+				}
+				throw error;
+			}
+		},
+		{ maxRetries: options?.maxRetries, maxRetryDelayMs: options?.maxRetryDelayMs, signal: options?.signal },
+	);
+}
 
 /** Over-long header values are dropped rather than truncated: a truncated request id is not a request id. */
 const MAX_BEDROCK_DIAGNOSTIC_VALUE_CHARS = 200;

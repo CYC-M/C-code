@@ -6,10 +6,18 @@
  */
 
 import type { Server } from "node:http";
+import { truncateErrorText } from "../../utils/error-body.ts";
 import { getProviderEnvValue } from "../../utils/provider-env.ts";
 import type { OAuthAuth, OAuthCredential, ProviderAuthInteraction } from "../types.ts";
 import { oauthErrorHtml, oauthSuccessHtml } from "./oauth-page.ts";
 import { generatePKCE } from "./pkce.ts";
+
+/**
+ * Token endpoints answer failures with small JSON documents or full HTML error pages.
+ * These messages reach the user and are persisted in session files, so keep an excerpt
+ * instead of the whole body.
+ */
+const MAX_OAUTH_ERROR_BODY_CHARS = 512;
 
 type CallbackServerInfo = {
 	server: Server;
@@ -79,6 +87,10 @@ function parseAuthorizationInput(input: string): { code?: string; state?: string
 	return { code: value };
 }
 
+/**
+ * Describe an error without its stack: these messages are shown to users and persisted in
+ * session files, and the frames of a failed fetch carry no actionable information.
+ */
 function formatErrorDetails(error: unknown): string {
 	if (error instanceof Error) {
 		const details: string[] = [`${error.name}: ${error.message}`];
@@ -87,9 +99,6 @@ function formatErrorDetails(error: unknown): string {
 		if (typeof errorWithCode.errno !== "undefined") details.push(`errno=${String(errorWithCode.errno)}`);
 		if (typeof error.cause !== "undefined") {
 			details.push(`cause=${formatErrorDetails(error.cause)}`);
-		}
-		if (error.stack) {
-			details.push(`stack=${error.stack}`);
 		}
 		return details.join("; ");
 	}
@@ -181,7 +190,9 @@ async function postJson(url: string, body: Record<string, string | number>, sign
 	const responseBody = await response.text();
 
 	if (!response.ok) {
-		throw new Error(`HTTP request failed. status=${response.status}; url=${url}; body=${responseBody}`);
+		throw new Error(
+			`HTTP request failed. status=${response.status}; url=${url}; body=${truncateErrorText(responseBody, MAX_OAUTH_ERROR_BODY_CHARS)}`,
+		);
 	}
 
 	return responseBody;
@@ -219,7 +230,7 @@ async function exchangeAuthorizationCode(
 		tokenData = JSON.parse(responseBody) as { access_token: string; refresh_token: string; expires_in: number };
 	} catch (error) {
 		throw new Error(
-			`Token exchange returned invalid JSON. url=${TOKEN_URL}; body=${responseBody}; details=${formatErrorDetails(error)}`,
+			`Token exchange returned invalid JSON. url=${TOKEN_URL}; body=${truncateErrorText(responseBody, MAX_OAUTH_ERROR_BODY_CHARS)}; details=${formatErrorDetails(error)}`,
 		);
 	}
 
@@ -340,7 +351,7 @@ async function refreshAnthropicToken(refreshToken: string, signal: AbortSignal):
 		};
 	} catch (error) {
 		throw new Error(
-			`Anthropic token refresh returned invalid JSON. url=${TOKEN_URL}; body=${responseBody}; details=${formatErrorDetails(error)}`,
+			`Anthropic token refresh returned invalid JSON. url=${TOKEN_URL}; body=${truncateErrorText(responseBody, MAX_OAUTH_ERROR_BODY_CHARS)}; details=${formatErrorDetails(error)}`,
 		);
 	}
 

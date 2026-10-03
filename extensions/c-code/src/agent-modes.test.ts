@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import {
 	DANGEROUS_BASH_PATTERNS,
@@ -87,5 +88,17 @@ describe("themeForMode", () => {
 		expect(themeForMode("plan")).toBe("c-code-yellow");
 		expect(themeForMode("build")).toBe("c-code-green");
 		expect(themeForMode("yolo")).toBe("c-code-red");
+	});
+
+	test("三模式 accent 各异，teamwork 输入框边框跟随变色", () => {
+		const accentOf = (theme: string): string => {
+			const raw = readFileSync(new URL(`../themes/${theme}.json`, import.meta.url), "utf8");
+			return (JSON.parse(raw) as { vars: { accent: string } }).vars.accent;
+		};
+		const accents = MODE_ORDER.map((mode) => accentOf(themeForMode(mode)));
+		expect(new Set(accents).size).toBe(MODE_ORDER.length);
+		expect(accentOf("c-code-green")).toBe("#00FF87");
+		expect(accentOf("c-code-yellow")).toBe("#FFD60A");
+		expect(accentOf("c-code-red")).toBe("#FF453A");
 	});
 });

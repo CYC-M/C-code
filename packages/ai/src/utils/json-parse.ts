@@ -94,6 +94,33 @@ export function parseJsonWithRepair<T>(json: string): T {
 	}
 }
 
+function isJsonWhitespace(code: number): boolean {
+	return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d;
+}
+
+/**
+ * Whether the trailing character closes a JSON container, i.e. whether the buffer could
+ * already be complete. Streamed tool arguments spend most of their life unterminated.
+ */
+function endsWithClosedContainer(text: string): boolean {
+	let end = text.length;
+	while (end > 0) {
+		const code = text.charCodeAt(end - 1);
+		if (!isJsonWhitespace(code)) return code === 0x7d /* } */ || code === 0x5d /* ] */;
+		end--;
+	}
+	return false;
+}
+
+function startsWithContainer(text: string): boolean {
+	for (let index = 0; index < text.length; index++) {
+		const code = text.charCodeAt(index);
+		if (isJsonWhitespace(code)) continue;
+		return code === 0x7b /* { */ || code === 0x5b /* [ */;
+	}
+	return false;
+}
+
 /**
  * Attempts to parse potentially incomplete JSON during streaming.
  * Always returns a valid object, even if the JSON is incomplete.
@@ -104,6 +131,24 @@ export function parseJsonWithRepair<T>(json: string): T {
 export function parseStreamingJson<T = Record<string, unknown>>(partialJson: string | undefined): T {
 	if (!partialJson || partialJson.trim() === "") {
 		return {} as T;
+	}
+
+	// An unterminated container can never parse as complete JSON, so skip the
+	// JSON.parse-based attempts: on every streamed chunk they walk the whole buffer and
+	// fail, and repairJson rebuilds the string first. The partial parser below is the
+	// only one that can succeed on an incomplete buffer.
+	if (startsWithContainer(partialJson) && !endsWithClosedContainer(partialJson)) {
+		try {
+			const result = partialParse(partialJson);
+			return (result ?? {}) as T;
+		} catch {
+			try {
+				const result = partialParse(repairJson(partialJson));
+				return (result ?? {}) as T;
+			} catch {
+				return {} as T;
+			}
+		}
 	}
 
 	try {

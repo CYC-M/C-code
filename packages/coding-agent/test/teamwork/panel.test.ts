@@ -60,6 +60,33 @@ describe("teamwork panel reducer", () => {
 		expect(state.members[1]).toMatchObject({ status: "completed", summary: "API done" });
 	});
 
+	it("stores real usage from member.completed and review.completed", () => {
+		let state = initPanelState("run-1", "ship it", team);
+		state = applyTeamworkEvent(state, startedA());
+		const usage = { input: 100, output: 40, cacheRead: 10, cacheWrite: 2, total: 152 };
+		state = applyTeamworkEvent(state, {
+			type: "member.completed",
+			runId: "run-1",
+			roleId: "worker-a",
+			provider: "openai",
+			model: "gpt-5-mini",
+			taskId: "t1",
+			summary: "API done",
+			usage,
+		});
+		expect(state.members[1]).toMatchObject({ status: "completed", usage });
+		const reviewUsage = { input: 50, output: 20, cacheRead: 5, cacheWrite: 0, total: 75 };
+		state = applyTeamworkEvent(state, {
+			type: "review.completed",
+			runId: "run-1",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			verdict: "pass",
+			usage: reviewUsage,
+		});
+		expect(state.members[3]).toMatchObject({ status: "completed", usage: reviewUsage });
+	});
+
 	it("out-of-order/duplicate events are idempotent", () => {
 		let state = initPanelState("run-1", "ship it", team);
 		state = applyTeamworkEvent(state, startedA());

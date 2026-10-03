@@ -885,23 +885,44 @@ const websocketSessionCache = new Map<string, Map<string, CachedWebSocketConnect
 const websocketDebugStats = new Map<string, OpenAICodexWebSocketDebugStats>();
 const websocketSseFallbackSessions = new Set<string>();
 
+/**
+ * Diagnostic entries retained per session id. A long-lived process sees unbounded session
+ * ids, and these maps are never otherwise emptied, so keep only the most recently used
+ * sessions. Sockets themselves are not affected: they are closed by their idle timers.
+ */
+const MAX_WEBSOCKET_SESSION_ENTRIES = 64;
+
+function trimWebsocketSessionBookkeeping(): void {
+	while (websocketDebugStats.size > MAX_WEBSOCKET_SESSION_ENTRIES) {
+		const oldest = websocketDebugStats.keys().next().value;
+		if (oldest === undefined) return;
+		websocketDebugStats.delete(oldest);
+		websocketSseFallbackSessions.delete(oldest);
+	}
+}
+
 function getOrCreateWebSocketDebugStats(sessionId: string): OpenAICodexWebSocketDebugStats {
 	let stats = websocketDebugStats.get(sessionId);
-	if (!stats) {
-		stats = {
-			requests: 0,
-			connectionsCreated: 0,
-			connectionsReused: 0,
-			cachedContextRequests: 0,
-			storeTrueRequests: 0,
-			fullContextRequests: 0,
-			deltaRequests: 0,
-			lastInputItems: 0,
-			websocketFailures: 0,
-			sseFallbacks: 0,
-		};
+	if (stats) {
+		// Re-insert so the oldest-first eviction above drops idle sessions, not active ones.
+		websocketDebugStats.delete(sessionId);
 		websocketDebugStats.set(sessionId, stats);
+		return stats;
 	}
+	stats = {
+		requests: 0,
+		connectionsCreated: 0,
+		connectionsReused: 0,
+		cachedContextRequests: 0,
+		storeTrueRequests: 0,
+		fullContextRequests: 0,
+		deltaRequests: 0,
+		lastInputItems: 0,
+		websocketFailures: 0,
+		sseFallbacks: 0,
+	};
+	websocketDebugStats.set(sessionId, stats);
+	trimWebsocketSessionBookkeeping();
 	return stats;
 }
 

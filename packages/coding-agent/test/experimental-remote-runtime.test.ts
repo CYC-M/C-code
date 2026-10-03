@@ -393,7 +393,7 @@ describe("experimental durable server composition", () => {
 				`${JSON.stringify({
 					name: "@earendil-works/second-session-plugin",
 					version: "1.0.0",
-					peerDependencies: { "@earendil-works/chord": "^0.84.4" },
+					peerDependencies: { "@earendil-works/chord": "^0.0.1-beta" },
 				})}\n`,
 			),
 			writeFile(

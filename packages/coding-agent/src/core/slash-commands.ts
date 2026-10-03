@@ -17,7 +17,11 @@ export interface BuiltinSlashCommand {
 }
 
 export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
-	{ name: "teamwork", description: "Run a multi-model team (brain → workers → reviewer)", argumentHint: "<goal>" },
+	{
+		name: "teamwork",
+		description: "Enter teamwork mode (brain → workers → reviewer)",
+		argumentHint: "[exit|bind <role…>|thinking <role>]",
+	},
 	{ name: "settings", description: "Open settings menu" },
 	{ name: "model", description: "Select model (opens selector UI)", argumentHint: "<provider/model>" },
 	{ name: "tree", description: "Navigate session tree (switch branches)" },

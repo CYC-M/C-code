@@ -137,13 +137,13 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 		this.addChild(new Spacer(1));
 
-		// Hint: selecting (Enter or Ctrl+S) always remembers the model as the default.
+		// Hint: Enter selects the model, the save binding also remembers it as the default.
 		if (this.onSelectAsDefaultCallback) {
 			this.addChild(
 				new Text(
 					theme.fg(
 						"dim",
-						`  ${keyDisplayText("tui.select.confirm")} to select & remember · ${keyDisplayText("tui.select.cancel")} to cancel`,
+						`  ${keyDisplayText("tui.select.confirm")} to select · ${keyDisplayText("app.models.save")} to set as default · ${keyDisplayText("tui.select.cancel")} to cancel`,
 					),
 					0,
 					0,

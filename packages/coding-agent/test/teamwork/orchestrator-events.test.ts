@@ -19,7 +19,13 @@ function fakeClient(workerText: string, reviewText: string) {
 		find: vi.fn((provider: string, model: string) => ({ provider, id: model })),
 		complete: vi.fn(async (_model: unknown, context: { systemPrompt?: string; messages: { content: unknown }[] }) => {
 			const text = JSON.stringify(context);
-			return text.includes("Run team-") ? reviewText : workerText;
+			const isReview = text.includes("Run team-");
+			return {
+				text: isReview ? reviewText : workerText,
+				usage: isReview
+					? { input: 50, output: 20, cacheRead: 5, cacheWrite: 0, total: 75 }
+					: { input: 100, output: 40, cacheRead: 10, cacheWrite: 0, total: 150 },
+			};
 		}),
 		hasConfiguredAuth: vi.fn(() => true),
 	};
@@ -62,6 +68,27 @@ describe("orchestrator events", () => {
 		expect(started).toMatchObject({ provider: "o", model: "m", taskId: "t1", taskTitle: "t" });
 		const completed = events.find((e) => e.type === "review.completed");
 		expect(completed).toMatchObject({ verdict: "pass" });
+	});
+
+	it("carries real usage on member.completed and review.completed", async () => {
+		const run = createRun("goal", team, tasks);
+		const client = fakeClient('{"summary":"done"}', '{"verdict":"pass","findings":[]}');
+		const events: TeamworkEvent[] = [];
+		await runTeamRound(
+			run,
+			client,
+			async () => "",
+			0,
+			(e) => events.push(e),
+		);
+		const memberCompleted = events.find((e) => e.type === "member.completed");
+		expect(memberCompleted).toMatchObject({
+			usage: { input: 100, output: 40, cacheRead: 10, cacheWrite: 0, total: 150 },
+		});
+		const reviewCompleted = events.find((e) => e.type === "review.completed");
+		expect(reviewCompleted).toMatchObject({
+			usage: { input: 50, output: 20, cacheRead: 5, cacheWrite: 0, total: 75 },
+		});
 	});
 
 	it("lists finding taskIds on needs_fix and returns to brain as dispatched", async () => {

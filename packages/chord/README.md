@@ -140,7 +140,7 @@ facet path conventions supplied by the host application:
   "version": "1.0.0",
   "type": "module",
   "peerDependencies": {
-    "@earendil-works/chord": "^0.84.4"
+    "@earendil-works/chord": "^0.0.1-beta"
   },
   "chord": {
     "facets": {

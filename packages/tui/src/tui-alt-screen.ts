@@ -6,6 +6,7 @@ import {
 } from "./alt-screen-search.ts";
 import { AltScreenFlashContainer } from "./components/alt-screen-flash.ts";
 import { ScrollView } from "./components/scroll-view.ts";
+import { findSelectionBoundaryAt } from "./components/selection-boundary.ts";
 import { getKeybindings } from "./keybindings.ts";
 import { isKeyRelease } from "./keys.ts";
 import {
@@ -1408,12 +1409,18 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		let start = Math.max(0, minColumn);
 		let end = Math.min(lineWidth, maxColumn);
 		if (row === selection.start.row) {
-			start = getGraphemeCellRange(line, selection.start.col)?.start ?? Math.min(selection.start.col, lineWidth);
+			start = Math.max(
+				minColumn,
+				getGraphemeCellRange(line, selection.start.col)?.start ?? Math.min(selection.start.col, lineWidth),
+			);
 		}
 		if (row === selection.end.row) {
-			end = selection.end.boundary
-				? Math.min(selection.end.col, lineWidth)
-				: (getGraphemeCellRange(line, selection.end.col)?.end ?? Math.min(selection.end.col + 1, lineWidth));
+			end = Math.min(
+				maxColumn,
+				selection.end.boundary
+					? Math.min(selection.end.col, lineWidth)
+					: (getGraphemeCellRange(line, selection.end.col)?.end ?? Math.min(selection.end.col + 1, lineWidth)),
+			);
 		}
 		return { start: Math.max(minColumn, start), end: Math.min(maxColumn, end) };
 	}
@@ -1428,10 +1435,27 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (!box?.scrollContentLines) return undefined;
 			sourceLines = box.scrollContentLines;
 		}
+		// Selections that start inside a SelectionBoundary are clipped to it so
+		// copies never bleed into neighboring regions (either direction).
+		let minRow = selection.start.row;
+		let maxRow = selection.end.row;
+		let minColumn = 0;
+		let maxColumn = Number.MAX_SAFE_INTEGER;
+		const anchor = this.selectionAnchor;
+		if (!selection.start.scrollView && anchor && this.currentLayout) {
+			const boundary = findSelectionBoundaryAt(this.currentLayout, anchor.col, anchor.row);
+			if (boundary) {
+				minRow = Math.max(minRow, boundary.y);
+				maxRow = Math.min(maxRow, boundary.y + Math.max(0, boundary.height - 1));
+				if (minRow > maxRow) return undefined;
+				minColumn = boundary.x;
+				maxColumn = boundary.x + boundary.width;
+			}
+		}
 		const lines: string[] = [];
-		for (let row = selection.start.row; row <= selection.end.row; row++) {
+		for (let row = minRow; row <= maxRow; row++) {
 			const line = sourceLines[row] ?? "";
-			const columns = this.getSelectionColumns(line, row, selection);
+			const columns = this.getSelectionColumns(line, row, selection, minColumn, maxColumn);
 			lines.push(
 				stripTerminalSequences(
 					sliceByColumn(line, columns.start, Math.max(0, columns.end - columns.start), true),

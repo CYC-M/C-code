@@ -15,6 +15,11 @@ export interface TeamTask {
 	title: string;
 	goal: string;
 	role: RoleId;
+	/**
+	 * Short description of the work this worker does, shown as `worker1（UI designer）`.
+	 * Derived from the leader's role name when it uses the `workerN（…）` form.
+	 */
+	roleDescription?: string;
 	dependsOn?: string[];
 	inputs?: Record<string, unknown>;
 	successCriteria: string[];
@@ -37,6 +42,14 @@ export interface TaskPackage {
 	depth: number;
 }
 
+export interface TeamUsage {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	total: number;
+}
+
 export interface WorkerResult {
 	taskId: string;
 	role: RoleId;
@@ -46,7 +59,7 @@ export interface WorkerResult {
 	artifacts?: { path: string; kind: string }[];
 	data?: unknown;
 	error?: string;
-	usage?: { inputTokens: number; outputTokens: number };
+	usage?: TeamUsage;
 }
 
 export interface ReviewFinding {
@@ -61,6 +74,7 @@ export interface ReviewResult {
 	verdict: "pass" | "needs_fix";
 	findings: ReviewFinding[];
 	retryPlan?: { taskIds: string[]; instructions: string; swapWorker?: { taskId: string; newRole: RoleId }[] };
+	usage?: TeamUsage;
 }
 
 export interface RoleDefinition {
@@ -86,6 +100,8 @@ export interface TeamRosterEntry {
 	roleId: string;
 	provider: string;
 	model: string;
+	/** Work description from the leader's task list, when it named one. */
+	description?: string;
 }
 
 export interface TeamRoster {
@@ -113,6 +129,7 @@ export type TeamworkEvent =
 			model: string;
 			taskId: string;
 			summary: string;
+			usage?: TeamUsage;
 	  }
 	| {
 			type: "member.failed";
@@ -131,6 +148,7 @@ export type TeamworkEvent =
 			model: string;
 			verdict: "pass" | "needs_fix";
 			failedTaskIds?: string[];
+			usage?: TeamUsage;
 	  }
 	| { type: "teamwork.completed"; runId: string; phase: RunPhase };
 

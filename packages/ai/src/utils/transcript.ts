@@ -130,6 +130,22 @@ export function toToolDeclaration(tool: Tool): Tool {
 }
 
 /**
+ * Serialized declarations by tool object. Tools are treated as immutable once created
+ * (nothing in the workspace mutates a tool's declaration fields), and the same objects
+ * are compared on every turn, so the JSON round-trip plus stringify is paid once per
+ * tool instead of once per comparison.
+ */
+const toolDeclarationKeys = new WeakMap<Tool, string>();
+
+function declarationKey(tool: Tool): string {
+	const cached = toolDeclarationKeys.get(tool);
+	if (cached !== undefined) return cached;
+	const key = JSON.stringify(toToolDeclaration(tool));
+	toolDeclarationKeys.set(tool, key);
+	return key;
+}
+
+/**
  * Whether two tools declare the same interface to the model.
  *
  * Both sides go through {@link toToolDeclaration} first: its JSON round-trip drops the
@@ -138,7 +154,8 @@ export function toToolDeclaration(tool: Tool): Tool {
  * is exact. This avoids a deep-equal dependency in a browser-safe package.
  */
 export function declarationsEqual(left: Tool, right: Tool): boolean {
-	return JSON.stringify(toToolDeclaration(left)) === JSON.stringify(toToolDeclaration(right));
+	if (left === right) return true;
+	return declarationKey(left) === declarationKey(right);
 }
 
 export interface ToolStateChanges {

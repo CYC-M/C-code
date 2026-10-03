@@ -1350,13 +1350,20 @@ export abstract class TuiBase extends Container implements TUI {
 		return result;
 	}
 
+	/**
+	 * Normalize one line and append the reset that ends its styling. Image lines carry
+	 * protocol bytes and must be written verbatim.
+	 *
+	 * Renderers call this per written line instead of over the whole buffer so that
+	 * unchanged lines are never rewritten.
+	 */
+	protected applyLineReset(line: string): string {
+		return isImageLine(line) ? line : normalizeTerminalOutput(line) + SEGMENT_RESET;
+	}
+
 	protected applyLineResets(lines: string[]): string[] {
-		const reset = SEGMENT_RESET;
 		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i];
-			if (!isImageLine(line)) {
-				lines[i] = normalizeTerminalOutput(line) + reset;
-			}
+			lines[i] = this.applyLineReset(lines[i]);
 		}
 		return lines;
 	}

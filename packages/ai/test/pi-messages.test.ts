@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { type PiMessagesOptions, stream, streamSimple } from "../src/api/pi-messages.ts";
-import type { Api, AssistantMessageEvent, Context, Model, StopReason } from "../src/types.ts";
+import type { Api, AssistantMessageEvent, Context, FetchFunction, Model, StopReason } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 type RecordedRequest = {
@@ -240,6 +240,49 @@ describe("pi-messages", () => {
 
 		expect(message.stopReason).toBe("error");
 		expect(message.errorMessage).toContain("stream ended without a terminal event");
+	});
+
+	it("retries retryable HTTP failures when maxRetries is set", async () => {
+		const model = createModel("http://127.0.0.1:9/v1");
+		let calls = 0;
+		const fetch: FetchFunction = async () => {
+			calls++;
+			if (calls === 1) {
+				return new Response('{"error":{"code":"rate_limited"}}', {
+					status: 429,
+					headers: { "retry-after-ms": "0" },
+				});
+			}
+			const body = `data: ${JSON.stringify({ type: "start" })}\n\ndata: ${JSON.stringify({
+				type: "done",
+				reason: "stop",
+				usage,
+			})}\n\n`;
+			return new Response(body, { headers: { "content-type": "text/event-stream" } });
+		};
+
+		const message = await stream(model, normalizeContext(context), {
+			apiKey: "test-key",
+			fetch,
+			maxRetries: 1,
+		}).result();
+
+		expect(calls).toBe(2);
+		expect(message.stopReason).toBe("stop");
+	});
+
+	it("does not retry HTTP failures by default", async () => {
+		const model = createModel("http://127.0.0.1:9/v1");
+		let calls = 0;
+		const fetch: FetchFunction = async () => {
+			calls++;
+			return new Response('{"error":{"code":"rate_limited"}}', { status: 429 });
+		};
+
+		const message = await stream(model, normalizeContext(context), { apiKey: "test-key", fetch }).result();
+
+		expect(calls).toBe(1);
+		expect(message.stopReason).toBe("error");
 	});
 });
 

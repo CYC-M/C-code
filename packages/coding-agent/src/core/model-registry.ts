@@ -124,6 +124,11 @@ export class ModelRegistry {
 		return this.runtime.complete(model, context, options);
 	}
 
+	/** Single-shot call with provider-neutral options (e.g. per-role thinking level). */
+	completeSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): Promise<AssistantMessage> {
+		return this.runtime.completeSimple(model, context, options);
+	}
+
 	getProviderDisplayName(provider: string): string {
 		return this.runtime.getProvider(provider)?.name ?? provider;
 	}

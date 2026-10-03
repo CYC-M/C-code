@@ -168,6 +168,24 @@ function trimPartialClosingFences(tokens: readonly Token[]): void {
 	token.text = token.text.slice(0, -lastLine.length).replace(/\n$/, "");
 }
 
+/**
+ * Rendered prefix of a streaming Markdown document.
+ *
+ * `stableSource` is the document prefix that has already been verified to render
+ * identically, `lines` holds its rendered content lines, and `renderOffset` is where
+ * rendering of the live tail starts (one block before the verified boundary, so the
+ * last frozen block's spacing decision stays observable to the next frame).
+ */
+interface FrozenPrefix {
+	stableSource: string;
+	lines: string[];
+	renderOffset: number;
+	width: number;
+}
+
+/** Minimum number of trailing characters that are never frozen. */
+const MIN_LIVE_TAIL_CHARS = 256;
+
 const markdownParser = new Marked();
 markdownParser.setOptions({
 	tokenizer: new StrictStrikethroughTokenizer(),
@@ -247,6 +265,15 @@ export class Markdown implements Component {
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 
+	/**
+	 * Rendered prefix of a shorter version of the current text.
+	 *
+	 * Streaming appends to the end, so everything up to a completed block renders
+	 * identically on every frame. Keeping those lines lets a frame re-lex and
+	 * re-render only the tail instead of the whole document.
+	 */
+	private frozenPrefix?: FrozenPrefix;
+
 	constructor(
 		text: string,
 		paddingX: number,
@@ -265,13 +292,18 @@ export class Markdown implements Component {
 
 	setText(text: string): void {
 		this.text = text;
-		this.invalidate();
+		this.cachedText = undefined;
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
+		// `frozenPrefix` is kept: the next render validates that the new text still
+		// starts with it, which is the streaming append case.
 	}
 
 	invalidate(): void {
 		this.cachedText = undefined;
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
+		this.frozenPrefix = undefined;
 	}
 
 	render(width: number): string[] {
@@ -295,62 +327,41 @@ export class Markdown implements Component {
 		}
 
 		// Replace tabs with 3 spaces for consistent rendering
-		const normalizedText = text.replace(/\t/g, "   ");
+		const normalizedText = text.includes("\t") ? text.replace(/\t/g, "   ") : text;
+
+		// Reuse the already rendered prefix when the document only grew at the end.
+		const frozen = this.frozenPrefix;
+		const reusable =
+			frozen !== undefined &&
+			frozen.width === width &&
+			frozen.renderOffset < normalizedText.length &&
+			normalizedText.startsWith(frozen.stableSource)
+				? frozen
+				: undefined;
+		const renderOffset = reusable?.renderOffset ?? 0;
+		const liveText = reusable ? normalizedText.slice(renderOffset) : normalizedText;
 
 		// Parse markdown to HTML-like tokens
-		const tokens = markdownParser.lexer(normalizedText);
+		const tokens = markdownParser.lexer(liveText);
 		trimPartialClosingFences(tokens);
 
-		// Convert tokens to styled terminal output
-		const renderedLines: string[] = [];
-
+		// Convert tokens to styled, wrapped, padded lines. Per-token arrays let the
+		// completed prefix be frozen for the next frame.
+		const tokenLines: string[][] = [];
 		for (let i = 0; i < tokens.length; i++) {
-			const token = tokens[i];
-			const nextToken = tokens[i + 1];
-			const tokenLines = this.renderToken(token, contentWidth, nextToken?.type);
-			for (const tokenLine of tokenLines) {
-				renderedLines.push(tokenLine);
-			}
+			tokenLines.push(this.renderToken(tokens[i], contentWidth, tokens[i + 1]?.type));
 		}
+		const liveLines = tokenLines.map((lines) => this.finishContentLines(lines, width, contentWidth));
 
-		// Wrap lines (NO padding, NO background yet)
-		const wrappedLines: string[] = [];
-		for (const line of renderedLines) {
-			if (isImageLine(line)) {
-				wrappedLines.push(line);
-			} else {
-				for (const wrappedLine of wrapTextWithAnsi(line, contentWidth)) {
-					wrappedLines.push(wrappedLine);
-				}
-			}
-		}
+		// Freeze the completed prefix. The last frozen block is kept live (rendering
+		// restarts one token earlier) so its spacing decision stays observable.
+		this.freezeCompletedPrefix(normalizedText, liveText, tokens, liveLines, renderOffset, width, reusable);
 
-		// Add margins and background to each wrapped line
-		const leftMargin = " ".repeat(this.paddingX);
-		const rightMargin = " ".repeat(this.paddingX);
-		const bgFn = this.defaultTextStyle?.bgColor;
-		const contentLines: string[] = [];
-
-		for (const line of wrappedLines) {
-			if (isImageLine(line)) {
-				contentLines.push(line);
-				continue;
-			}
-
-			const lineWithMargins = leftMargin + line + rightMargin;
-
-			if (bgFn) {
-				contentLines.push(applyBackgroundToLine(lineWithMargins, width, bgFn));
-			} else {
-				// No background - just pad to width
-				const visibleLen = visibleWidth(lineWithMargins);
-				const paddingNeeded = Math.max(0, width - visibleLen);
-				contentLines.push(lineWithMargins + " ".repeat(paddingNeeded));
-			}
-		}
+		const contentLines = reusable ? reusable.lines.concat(...liveLines) : liveLines.flat();
 
 		// Add top/bottom padding (empty lines)
 		const emptyLine = " ".repeat(width);
+		const bgFn = this.defaultTextStyle?.bgColor;
 		const emptyLines: string[] = [];
 		for (let i = 0; i < this.paddingY; i++) {
 			const line = bgFn ? applyBackgroundToLine(emptyLine, width, bgFn) : emptyLine;
@@ -366,6 +377,79 @@ export class Markdown implements Component {
 		this.cachedLines = result;
 
 		return result.length > 0 ? result : [""];
+	}
+
+	/** Wrap one token's rendered lines and add the margins and background. */
+	private finishContentLines(lines: readonly string[], width: number, contentWidth: number): string[] {
+		const leftMargin = " ".repeat(this.paddingX);
+		const rightMargin = " ".repeat(this.paddingX);
+		const bgFn = this.defaultTextStyle?.bgColor;
+		const finished: string[] = [];
+
+		for (const line of lines) {
+			if (isImageLine(line)) {
+				finished.push(line);
+				continue;
+			}
+			for (const wrappedLine of wrapTextWithAnsi(line, contentWidth)) {
+				const lineWithMargins = leftMargin + wrappedLine + rightMargin;
+				if (bgFn) {
+					finished.push(applyBackgroundToLine(lineWithMargins, width, bgFn));
+					continue;
+				}
+				const visibleLen = visibleWidth(lineWithMargins);
+				finished.push(lineWithMargins + " ".repeat(Math.max(0, width - visibleLen)));
+			}
+		}
+
+		return finished;
+	}
+
+	/**
+	 * Remember the longest token prefix that is guaranteed to keep rendering the same.
+	 *
+	 * Tokens end at real block boundaries, so re-lexing from the start of a token
+	 * yields the same tokens. Only prefixes that end at least {@link MIN_LIVE_TAIL_CHARS}
+	 * before the end are frozen, and the block right before the boundary stays live so
+	 * its next-token spacing decision is recomputed each frame.
+	 */
+	private freezeCompletedPrefix(
+		normalizedText: string,
+		liveText: string,
+		tokens: readonly Token[],
+		liveLines: readonly string[][],
+		renderOffset: number,
+		width: number,
+		reusable: FrozenPrefix | undefined,
+	): void {
+		const starts: number[] = [];
+		const ends: number[] = [];
+		let offset = 0;
+		for (const token of tokens) {
+			starts.push(offset);
+			offset += token.raw.length;
+			ends.push(offset);
+		}
+
+		// `f` tokens are frozen, and the block at index `f` stays live so its
+		// next-token spacing decision is re-read from the stable region each frame.
+		let frozenCount = -1;
+		for (let f = 1; f < tokens.length; f++) {
+			if (liveText.length - ends[f] >= MIN_LIVE_TAIL_CHARS) frozenCount = f;
+		}
+		if (frozenCount < 1) {
+			// The live region cannot advance yet. Keep the existing prefix: it is still
+			// valid for this text, and dropping it would force a full re-render.
+			return;
+		}
+
+		const frozenLines = liveLines.slice(0, frozenCount).flat();
+		this.frozenPrefix = {
+			stableSource: normalizedText.slice(0, renderOffset + ends[frozenCount]),
+			lines: reusable ? reusable.lines.concat(frozenLines) : frozenLines,
+			renderOffset: renderOffset + starts[frozenCount],
+			width,
+		};
 	}
 
 	/**

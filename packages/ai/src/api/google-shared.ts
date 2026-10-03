@@ -461,11 +461,17 @@ export function mapStopReason(reason: FinishReason): StopReason {
 		case FinishReason.TOO_MANY_TOOL_CALLS:
 		case FinishReason.NO_IMAGE:
 			return "error";
-		default: {
-			const _exhaustive: never = reason;
-			throw new Error(`Unhandled stop reason: ${_exhaustive}`);
-		}
+		default:
+			// Compile-time exhaustiveness guard: `unexpectedFinishReason` only accepts `never`,
+			// so a new enum member fails the build. At runtime an unknown reason degrades
+			// instead of failing a response whose content is still usable.
+			return unexpectedFinishReason(reason);
 	}
+}
+
+/** Exhaustiveness guard for {@link mapStopReason}; degrades unknown runtime values. */
+function unexpectedFinishReason(_reason: never): StopReason {
+	return "error";
 }
 
 /**

@@ -131,7 +131,7 @@ import {
 	normalizeBuildSystemPromptOptions,
 } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
-import { createAllToolDefinitions } from "./tools/index.ts";
+import { createAllToolDefinitions, defaultActiveToolNames } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 
@@ -389,6 +389,7 @@ export class AgentSession {
 	private _allowedToolNames?: Set<string>;
 	private _excludedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
+	private _teamworkWorkerBindingsHook?: (roles: readonly string[], labels: Record<string, string>) => Promise<void>;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionMode: ExtensionMode = "print";
@@ -2252,6 +2253,17 @@ export class AgentSession {
 	 * Saves the clamped level to the session transcript only if the level actually changes.
 	 * Persists the requested level to global defaults only when options.persist is true.
 	 */
+	/**
+	 * Let the UI bind models for the workers a teamwork run needs but that have none yet.
+	 * The teamwork tool calls this mid-run, so the user answers a model prompt per worker
+	 * instead of the run failing with an unbound role.
+	 */
+	setTeamworkWorkerBindingsHook(
+		hook: ((roles: readonly string[], labels: Record<string, string>) => Promise<void>) | undefined,
+	): void {
+		this._teamworkWorkerBindingsHook = hook;
+	}
+
 	setThinkingLevel(level: ThinkingLevel, options: ModelMutationOptions = {}): void {
 		const availableLevels = this.getAvailableThinkingLevels();
 		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
@@ -3305,7 +3317,14 @@ export class AgentSession {
 			: createAllToolDefinitions(this._cwd, {
 					read: { autoResizeImages },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
-					teamwork: { sessionManager: this.sessionManager, settingsManager: this.settingsManager },
+					teamwork: {
+						sessionManager: this.sessionManager,
+						settingsManager: this.settingsManager,
+						// Reads the hook at call time: the UI installs it after the session starts.
+						ensureWorkerBindings: async (roles, labels) => {
+							await this._teamworkWorkerBindingsHook?.(roles, labels);
+						},
+					},
 				});
 
 		this._baseToolDefinitions = new Map(
@@ -3332,10 +3351,9 @@ export class AgentSession {
 		this._bindExtensionCore(this._extensionRunner);
 		this._applyExtensionBindings(this._extensionRunner);
 
-		const defaultActiveToolNames = this._baseToolsOverride
-			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write", "teamwork"];
-		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
+		const baseActiveToolNames =
+			options.activeToolNames ??
+			(this._baseToolsOverride ? Object.keys(this._baseToolsOverride) : [...defaultActiveToolNames]);
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
 			includeAllExtensionTools: options.includeAllExtensionTools,

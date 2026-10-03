@@ -1,17 +1,23 @@
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Context } from "@earendil-works/pi-ai";
 import { buildWorkerMessages, parseReviewOutput, parseWorkerOutput } from "./context.ts";
 import { assertBudgetForDispatch, transitionOnReview } from "./state.ts";
-import type { ReviewResult, TeamRunState, TeamTask, TeamworkEvent, WorkerResult } from "./types.ts";
+import type { ReviewResult, TeamRunState, TeamTask, TeamUsage, TeamworkEvent, WorkerResult } from "./types.ts";
 
 export interface WorkerModelRef {
 	provider: string;
 	id: string;
 }
 
+export interface WorkerCompletion {
+	text: string;
+	usage?: TeamUsage;
+}
+
 export interface WorkerModelClient {
 	find(provider: string, model: string): WorkerModelRef | undefined;
 	hasConfiguredAuth(ref: WorkerModelRef): boolean;
-	complete(model: WorkerModelRef, context: Context): Promise<string>;
+	complete(model: WorkerModelRef, context: Context, thinkingLevel?: ThinkingLevel): Promise<WorkerCompletion>;
 }
 
 export interface Executor {
@@ -72,7 +78,12 @@ export async function runTeamRound(
 			leader: run.team.leader,
 			workers: run.tasks.map((t) => {
 				const role = run.team.roles[t.role];
-				return { roleId: t.role, provider: role?.provider ?? "?", model: role?.model ?? "?" };
+				return {
+					roleId: t.role,
+					provider: role?.provider ?? "?",
+					model: role?.model ?? "?",
+					...(t.roleDescription ? { description: t.roleDescription } : {}),
+				};
 			}),
 			reviewer: {
 				provider: run.team.roles[run.team.reviewer]?.provider ?? "?",
@@ -133,7 +144,7 @@ async function callWorker(
 		taskId: task.id,
 		taskTitle: task.title,
 	});
-	const text = await client.complete(ref, messages).catch((error: unknown) => {
+	const completion = await client.complete(ref, messages, role.thinkingLevel).catch((error: unknown) => {
 		onEvent?.({
 			type: "member.failed",
 			runId: run.runId,
@@ -145,6 +156,8 @@ async function callWorker(
 		});
 		throw error;
 	});
+	const text = completion.text;
+	const usage = completion.usage;
 	try {
 		const parsed = parseWorkerOutput(text);
 		const nested = await maybeDelegate(run, task, parsed.data, client, readFile, depth, onEvent);
@@ -157,6 +170,7 @@ async function callWorker(
 			model: ref.id,
 			taskId: task.id,
 			summary: parsed.summary,
+			...(usage === undefined ? {} : { usage }),
 		});
 		return {
 			taskId: task.id,
@@ -166,6 +180,7 @@ async function callWorker(
 			summary: parsed.summary,
 			artifacts: parsed.artifacts,
 			data: parsed.data,
+			...(usage === undefined ? {} : { usage }),
 		};
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
@@ -275,10 +290,18 @@ async function callReviewer(
 		)
 		.join("\n\n");
 	onEvent?.({ type: "review.started", runId: run.runId, provider: ref.provider, model: ref.id });
-	const text = await client.complete(ref, {
-		systemPrompt: reviewerRole.systemPrompt,
-		messages: [{ role: "user", content: `Run ${run.runId} goal: ${run.goal}\n\n${report}`, timestamp: Date.now() }],
-	});
+	const completion = await client.complete(
+		ref,
+		{
+			systemPrompt: reviewerRole.systemPrompt,
+			messages: [
+				{ role: "user", content: `Run ${run.runId} goal: ${run.goal}\n\n${report}`, timestamp: Date.now() },
+			],
+		},
+		reviewerRole.thinkingLevel,
+	);
+	const text = completion.text;
+	const usage = completion.usage;
 	let review: ReviewResult;
 	try {
 		review = parseReviewOutput(text, run.runId);
@@ -289,6 +312,7 @@ async function callReviewer(
 			findings: [{ severity: "major", detail: "reviewer output unparseable", suggestion: "retry review" }],
 		};
 	}
+	if (usage !== undefined) review.usage = usage;
 	const failedTaskIds = [...new Set(review.findings.filter((f) => f.taskId).map((f) => f.taskId as string))];
 	onEvent?.({
 		type: "review.completed",
@@ -297,6 +321,7 @@ async function callReviewer(
 		model: ref.id,
 		verdict: review.verdict,
 		failedTaskIds,
+		...(usage === undefined ? {} : { usage }),
 	});
 	return review;
 }

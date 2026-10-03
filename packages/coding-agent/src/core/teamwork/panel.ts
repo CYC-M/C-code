@@ -1,4 +1,4 @@
-import type { RunPhase, TeamMemberStatus, TeamRoster, TeamworkEvent } from "./types.ts";
+import type { RunPhase, TeamMemberStatus, TeamRoster, TeamUsage, TeamworkEvent } from "./types.ts";
 
 export interface PanelMember {
 	kind: "leader" | "worker" | "reviewer";
@@ -6,9 +6,12 @@ export interface PanelMember {
 	provider: string;
 	model: string;
 	status: TeamMemberStatus;
+	/** Work description from the leader's task list, shown as `worker1（UI designer）`. */
+	description?: string;
 	taskId?: string;
 	taskTitle?: string;
 	summary?: string;
+	usage?: TeamUsage;
 }
 
 export interface TeamworkPanelState {
@@ -38,6 +41,7 @@ export function initPanelState(runId: string, goal: string, team: TeamRoster): T
 					provider: w.provider,
 					model: w.model,
 					status: "pending",
+					...(w.description === undefined ? {} : { description: w.description }),
 				}),
 			),
 			{ kind: "reviewer", provider: team.reviewer.provider, model: team.reviewer.model, status: "pending" },
@@ -92,6 +96,7 @@ export function applyTeamworkEvent(state: TeamworkPanelState, event: TeamworkEve
 				status: "completed",
 				taskId: event.taskId,
 				summary: event.summary,
+				...(event.usage === undefined ? {} : { usage: event.usage }),
 			}));
 		case "member.failed":
 			return withWorker(state, event.roleId, event.provider, event.model, (m) => ({
@@ -121,6 +126,7 @@ export function applyTeamworkEvent(state: TeamworkPanelState, event: TeamworkEve
 							provider: event.provider,
 							model: event.model,
 							status: "completed" as TeamMemberStatus,
+							...(event.usage === undefined ? {} : { usage: event.usage }),
 						};
 					}
 					if (

@@ -428,4 +428,41 @@ describe("Mistral HTTP transport", () => {
 		expect(message.stopReason).toBe("error");
 		expect(message.errorMessage).toBe('Mistral API error (403): {"message":"blocked by gateway"}');
 	});
+
+	it("retries retryable HTTP failures when maxRetries is set", async () => {
+		const model = getModel("mistral", "mistral-large-latest");
+		const context = normalizeContext({
+			messages: [{ role: "user", content: "hello", timestamp: 1 }],
+		});
+		let calls = 0;
+		const fetch: FetchFunction = async () => {
+			calls++;
+			if (calls === 1) {
+				return new Response('{"message":"slow down"}', { status: 429, headers: { "retry-after-ms": "0" } });
+			}
+			return createSseResponse([createTerminalEvent()]);
+		};
+
+		const message = await streamMistral(model, context, { apiKey: "test", fetch, maxRetries: 1 }).result();
+
+		expect(calls).toBe(2);
+		expect(message.stopReason).toBe("stop");
+	});
+
+	it("does not retry HTTP failures by default", async () => {
+		const model = getModel("mistral", "mistral-large-latest");
+		const context = normalizeContext({
+			messages: [{ role: "user", content: "hello", timestamp: 1 }],
+		});
+		let calls = 0;
+		const fetch: FetchFunction = async () => {
+			calls++;
+			return new Response('{"message":"slow down"}', { status: 429 });
+		};
+
+		const message = await streamMistral(model, context, { apiKey: "test", fetch }).result();
+
+		expect(calls).toBe(1);
+		expect(message.stopReason).toBe("error");
+	});
 });

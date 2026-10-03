@@ -111,6 +111,13 @@ export const allToolNames: Set<ToolName> = new Set([
 	"teamwork",
 ]);
 
+/**
+ * Built-in tools enabled for a new session, in the order they are offered to the model.
+ * Single source of truth for the default loadout: keep it here so the prompt, the SDK
+ * session factory, and `AgentSession` cannot drift apart.
+ */
+export const defaultActiveToolNames: readonly ToolName[] = ["read", "bash", "edit", "write", "teamwork"];
+
 export interface ToolsOptions {
 	read?: ReadToolOptions;
 	bash?: BashToolOptions;

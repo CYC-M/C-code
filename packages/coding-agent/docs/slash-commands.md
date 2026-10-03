@@ -55,14 +55,18 @@ Review a session before exporting or sharing it. Sessions can contain prompts, t
 
 | Command | Description |
 |---|---|
-| `/teamwork [<goal>]` | Delegate a goal to a multi-model team (brain → workers → reviewer) |
+| `/teamwork [exit\|bind <worker…>]` | Enter persistent teamwork mode (brain → workers → reviewer) |
 
-`/teamwork` is listed first in the `/` command menu. Run it without arguments to configure the team; passing a goal shows usage plus the current role bindings (it does not delegate immediately — invoke the `teamwork` tool to run).
+`/teamwork` enters persistent mode: the editor shows a `[teamwork]` badge with the effective leader plus an accent border. Run `/teamwork` with no arguments to configure the team; `/teamwork bind <worker…>` binds workers by hand; `/teamwork exit` (or double-Esc on an empty editor) leaves the mode. The first Esc pauses a running task with a reminder, the second Esc exits.
 
-- Roles and models are separate: each task references a role id, and each role id binds to one provider/model. Configure bindings with `/teamwork` (no arguments), which walks through the `worker` and `reviewer` roles. A `reviewer` binding is required.
+- Worker naming is fixed: the leader names workers `worker1`, `worker2`, ... in order and describes each job, shown as `worker1（UI designer）`. Roles are separate from models: each task references a worker id and each id binds to one provider/model, so a name the leader invents (`ui designer`) becomes the description of the next free worker instead of failing the run. A `reviewer` binding is required. The same model may back multiple roles.
+- Workers without a binding are bound while the run is being prepared: the leader sends the split, and you pick a model for each unbound worker in turn. Bind them ahead of time with `/teamwork bind worker1 worker2` (or the Workers pool section of `/teamwork`) to skip the prompts. Headless runs print the exact `bind` command instead.
+- Entering the mode configures `leader` + `reviewer` first.
+- Each role binding may carry its own thinking level (default `off`): pick it right after the model in `/teamwork` setup, click the Leader/Workers/Reviewer rows in the sidebar to reselect model + thinking, or run `/teamwork thinking <worker>` to change only the thinking level. It applies to new runs only.
 - Budget is a hard limit: each run allows at most `maxRounds` rounds (default 3) and `maxWorkerCalls` worker plus reviewer calls (default 12). The brain can override both per call via `budget`. When either limit is exhausted, the run ends as `failed`.
 - `failed` semantics: a failed run is not done. The brain reads the reviewer verdict and persisted state, then decides exactly one of `retry`, `swap_worker`, `revise_package`, `downgrade`, `finish` (only after a pass verdict), or `abort`. `downgrade` explicitly accepts a partial result and states what was dropped.
-- Config sections: `/teamwork` (no args) walks Leader → Workers pool → Reviewer. The Leader binding is display-only (the brain is always the session model). The Workers pool supports add/remove; every step shows the stored binding with keep/reselect.
+- Config sections: `/teamwork` (no args) walks Leader → Workers pool → Reviewer when re-run inside the mode. The Leader defaults to following the session model; selecting an independent model temporarily switches the session model while the mode is active and restores it on exit. The Workers pool supports add/remove; every step shows the stored binding with keep/reselect.
+- Sidebar: the roster column takes a share of the terminal width (30-46 columns) and text wraps instead of being cut off, so long model names and worker descriptions stay readable at any width. Workers fold by available height (`…N more`); the reviewer row, run line, and brand row always stay visible. Click a worker row to reconfigure it.
 - Panel: docked above the editor, visible only while a team run is active (plus a one-line summary after finish). Rows: title (`done/total · phase`), Leader, Workers (one line each, max 12 then `…N more`), Reviewer. Click a worker row to expand its task/summary. Statuses: `pending`/`working`/`completed`/`failed`/`reviewing`/`needs_fix`.
 - Events: the panel is fed by structured `details.teamwork` update events (full fidelity, no string parsing); the persisted run state remains in the `teamwork-run` session entry.
 

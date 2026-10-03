@@ -152,6 +152,29 @@ describe("FooterComponent width handling", () => {
 		}
 	});
 
+	it("marks truncated model names with an ellipsis instead of hard-cutting them", () => {
+		const width = 40;
+		const session = createSession({
+			sessionName: "",
+			modelId: "extremely-long-model-id-that-must-stay-visible",
+			provider: "very-long-provider-name",
+			reasoning: true,
+			thinkingLevel: "high",
+			usage: {
+				input: 12_345,
+				output: 6_789,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: { total: 1.234 },
+			},
+		});
+		const footer = new FooterComponent(session, createFooterData(2));
+
+		const statsLine = stripAnsi(footer.render(width)[1] ?? "");
+		expect(visibleWidth(statsLine)).toBeLessThanOrEqual(width);
+		expect(statsLine).toContain("…");
+	});
+
 	it("includes summary and tool result usage in the total cost", () => {
 		const session = createSession({
 			sessionName: "",

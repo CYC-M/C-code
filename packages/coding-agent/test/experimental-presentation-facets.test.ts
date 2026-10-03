@@ -62,8 +62,8 @@ describe("server-selected presentation facets", () => {
 				name: "@earendil-works/test-plugin",
 				version: "1.0.0",
 				peerDependencies: {
-					"@earendil-works/chord": "^0.84.4",
-					"@earendil-works/pi-coding-agent": "^0.84.4",
+					"@earendil-works/chord": "^0.0.1-beta",
+					"@earendil-works/pi-coding-agent": "^0.0.1-beta",
 				},
 			})}\n`,
 		);
@@ -102,7 +102,7 @@ describe("server-selected presentation facets", () => {
 				`${JSON.stringify({
 					name: "@earendil-works/second-test-plugin",
 					version: "1.0.0",
-					peerDependencies: { "@earendil-works/chord": "^0.84.4" },
+					peerDependencies: { "@earendil-works/chord": "^0.0.1-beta" },
 				})}\n`,
 			),
 			writeFile(

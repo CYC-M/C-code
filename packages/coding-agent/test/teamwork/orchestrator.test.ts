@@ -19,7 +19,13 @@ function fakeClient(workerText: string, reviewText: string) {
 		find: vi.fn((provider: string, model: string) => ({ provider, id: model })),
 		complete: vi.fn(async (_model: unknown, context: { systemPrompt?: string; messages: { content: unknown }[] }) => {
 			const text = JSON.stringify(context);
-			return text.includes("Run team-") ? reviewText : workerText;
+			const isReview = text.includes("Run team-");
+			return {
+				text: isReview ? reviewText : workerText,
+				usage: isReview
+					? { input: 50, output: 20, cacheRead: 5, cacheWrite: 0, total: 75 }
+					: { input: 100, output: 40, cacheRead: 10, cacheWrite: 0, total: 150 },
+			};
 		}),
 		hasConfiguredAuth: vi.fn(() => true),
 	};
@@ -33,6 +39,43 @@ describe("orchestrator", () => {
 		expect(final.phase).toBe("done");
 		expect(final.results.t1.summary).toBe("done");
 		expect(client.complete).toHaveBeenCalledTimes(2);
+	});
+
+	it("records real usage from worker and reviewer completions", async () => {
+		const run = createRun("goal", team, tasks);
+		const client = fakeClient('{"summary":"done"}', '{"verdict":"pass","findings":[]}');
+		const final = await runTeamRound(run, client, async () => "");
+		expect(final.results.t1.usage).toEqual({ input: 100, output: 40, cacheRead: 10, cacheWrite: 0, total: 150 });
+		expect(final.reviews[0].usage).toEqual({ input: 50, output: 20, cacheRead: 5, cacheWrite: 0, total: 75 });
+	});
+
+	it("passes each role thinkingLevel through to the model client", async () => {
+		const thinkingTeam: TeamConfig = {
+			roles: {
+				worker: { provider: "o", model: "m", systemPrompt: "W", thinkingLevel: "high" },
+				reviewer: { provider: "o", model: "m", systemPrompt: "R", thinkingLevel: "low" },
+			},
+			reviewer: "reviewer",
+			budget: { maxRounds: 2, maxWorkerCalls: 4 },
+			executor: "serial",
+		};
+		const run = createRun("goal", thinkingTeam, tasks);
+		const client = fakeClient('{"summary":"done"}', '{"verdict":"pass","findings":[]}');
+		const final = await runTeamRound(run, client, async () => "");
+		expect(final.phase).toBe("done");
+		const calls = client.complete.mock.calls as { 2?: unknown }[];
+		expect(calls[0]?.[2]).toBe("high");
+		expect(calls[1]?.[2]).toBe("low");
+	});
+
+	it("passes undefined thinkingLevel when roles have none configured", async () => {
+		const run = createRun("goal", team, tasks);
+		const client = fakeClient('{"summary":"done"}', '{"verdict":"pass","findings":[]}');
+		const final = await runTeamRound(run, client, async () => "");
+		expect(final.phase).toBe("done");
+		const calls = client.complete.mock.calls as { 2?: unknown }[];
+		expect(calls[0]?.[2]).toBeUndefined();
+		expect(calls[1]?.[2]).toBeUndefined();
 	});
 
 	it("needs_fix with exhausted budget fails without silent pass", async () => {
@@ -60,10 +103,20 @@ describe("orchestrator", () => {
 			hasConfiguredAuth: () => true,
 			complete: async (_model: unknown, context: { systemPrompt?: string; messages: { content: unknown }[] }) => {
 				const text = JSON.stringify(context);
-				if (text.includes("Run team-")) return '{"verdict":"pass","findings":[]}';
+				if (text.includes("Run team-"))
+					return {
+						text: '{"verdict":"pass","findings":[]}',
+						usage: { input: 50, output: 20, cacheRead: 5, cacheWrite: 0, total: 75 },
+					};
 				if (text.includes("Task t1:"))
-					return '{"summary":"parent","data":{"delegate":{"goal":"sub","tasks":[{"id":"s","title":"s","goal":"sg","role":"worker","successCriteria":["c"]}]}}}';
-				return '{"summary":"done"}';
+					return {
+						text: '{"summary":"parent","data":{"delegate":{"goal":"sub","tasks":[{"id":"s","title":"s","goal":"sg","role":"worker","successCriteria":["c"]}]}}}',
+						usage: { input: 100, output: 40, cacheRead: 10, cacheWrite: 0, total: 150 },
+					};
+				return {
+					text: '{"summary":"done"}',
+					usage: { input: 80, output: 30, cacheRead: 0, cacheWrite: 0, total: 110 },
+				};
 			},
 		};
 		const final = await runTeamRound(run, client, async () => "");

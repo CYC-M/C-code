@@ -9,6 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import {
 	type AssistantMessage,
 	type ImageContent,
@@ -116,7 +117,7 @@ import type { TeamworkEvent } from "../../core/teamwork/types.ts";
 import { withBuiltInRenderers } from "../../core/tools/renderers/index.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
-import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
+import { addUsageToTotals, createUsageTotals, getUsageCostBreakdown } from "../../core/usage-totals.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
@@ -127,7 +128,7 @@ import { loadAllHighlightLanguages } from "../../utils/syntax-highlight.ts";
 import { ensureTool, type ToolStatus } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { reportBug } from "./bug-report.ts";
-import { createChatViewport } from "./chat-viewport.ts";
+import { createChatViewport, shouldShowTeamSide, teamworkSideWidth } from "./chat-viewport.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
@@ -140,7 +141,7 @@ import { DynamicBorder } from "./components/dynamic-border.ts";
 import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
-import { FooterComponent, formatTokens } from "./components/footer.ts";
+import { FooterComponent, formatCwdForFooter, formatTokens } from "./components/footer.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { createMermaidMarkdownTransformer } from "./components/mermaid.ts";
@@ -163,6 +164,11 @@ import {
 	WorkingStatusIndicator,
 } from "./components/status-indicator.ts";
 import { TeamworkPanelComponent } from "./components/teamwork-panel.ts";
+import {
+	TeamworkSidebarComponent,
+	type TeamworkSidebarData,
+	toTeamworkMemberStatuses,
+} from "./components/teamwork-sidebar.ts";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
@@ -173,7 +179,17 @@ import { editInExternalEditor } from "./external-editor.ts";
 import { refreshModelCatalogs } from "./model-catalog-refresh.ts";
 import { getModelSearchText } from "./model-search.ts";
 import { shareSession } from "./session-share.ts";
-import { buildRoleBindingSummary, runTeamworkSetupWizard } from "./teamwork-wizard.ts";
+import {
+	buildRoleBindingSummary,
+	ensureWorkerBindings,
+	runAddWorkers,
+	runConfigureLeaderChoice,
+	runReconfigureRole,
+	runSetThinkingOnly,
+	runTeamworkInitialSetup,
+	runTeamworkSetupWizard,
+	type TeamworkWizardDeps,
+} from "./teamwork-wizard.ts";
 import {
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
@@ -507,6 +523,15 @@ export class InteractiveMode {
 
 	// Track if editor is in bash mode (text starts with !)
 	private isBashMode = false;
+
+	// Persistent teamwork mode: entered via /teamwork, exited via double-Esc or /teamwork exit.
+	private teamworkMode = false;
+	private teamworkLastEscapeTime = 0;
+	private teamworkPreviousModel: { provider: string; id: string } | undefined = undefined;
+	private teamworkPreviousThinking: ThinkingLevel | undefined = undefined;
+	private teamworkPreviousTuiMode: TuiMode | undefined = undefined;
+	private teamworkSidebar: TeamworkSidebarComponent | undefined = undefined;
+	private static readonly TEAMWORK_MODE_WIDGET_KEY = "teamwork-mode";
 
 	// Track current bash execution component
 	private bashComponent: BashExecutionComponent | undefined = undefined;
@@ -935,11 +960,12 @@ export class InteractiveMode {
 
 		// Keep one component tree and remount it when changing renderers.
 		this.renderWidgets(); // Initialize with default spacer
-		// Teamwork shares the status dock slot (createChatViewport exposes no
-		// dedicated slot): status stays on top, the panel renders directly below it.
+		// Teamwork renders in a right-side flow box on wide viewports
+		// (createChatViewport `side` slot, hidden below 90 columns in teamwork
+		// mode; narrow 90-119 columns use a fixed 30-wide column, 120+ expands).
+		// Main-screen mode renders it full-width directly below status.
 		const statusDock = new Container();
 		statusDock.addChild(this.statusContainer);
-		statusDock.addChild(this.teamworkContainer);
 		const viewport = createChatViewport({
 			document: this.documentContainer,
 			pendingMessages: this.pendingMessagesContainer,
@@ -948,6 +974,12 @@ export class InteractiveMode {
 			editor: this.editorContainer,
 			widgetsBelow: this.widgetContainerBelow,
 			footer: this.footerContainer,
+			side: this.teamworkContainer,
+			// Re-evaluated per render: the roster gets a wider column on wide terminals.
+			sideWidth: () => teamworkSideWidth(this.ui.terminal.columns),
+			sideMinViewportWidth: 100,
+			sideVisible: (viewport) => shouldShowTeamSide(this.teamworkMode, viewport.width),
+			isolateRegions: true,
 			scrollbar: this.settingsManager.getFullscreenScrollbar(),
 			scrollbarTrackStyle: (text) => theme.fg("scrollbarTrack", text),
 			scrollbarThumbStyle: (text) => theme.fg("scrollbarThumb", text),
@@ -958,6 +990,7 @@ export class InteractiveMode {
 			this.documentContainer,
 			this.pendingMessagesContainer,
 			statusDock,
+			this.teamworkContainer,
 			this.widgetContainerAbove,
 			this.editorContainer,
 			this.widgetContainerBelow,
@@ -2360,6 +2393,7 @@ export class InteractiveMode {
 		this.extensionWidgetsAbove.clear();
 		this.extensionWidgetsBelow.clear();
 		this.renderWidgets();
+		if (this.teamworkMode) this.updateTeamworkModeUI();
 	}
 
 	private resetExtensionUI(): void {
@@ -2975,13 +3009,32 @@ export class InteractiveMode {
 		this.defaultEditor.onEscape = () => {
 			if (this.session.isStreaming) {
 				this.restoreQueuedMessagesToEditor({ abort: true });
+				if (this.teamworkMode) {
+					this.teamworkLastEscapeTime = Date.now();
+					this.showStatus("teamwork 已暂停，再按一次 Esc 退出 teamwork 模式；继续输入则留在模式内。");
+				}
 			} else if (this.session.isBashRunning) {
 				this.session.abortBash();
+				if (this.teamworkMode) {
+					this.teamworkLastEscapeTime = Date.now();
+					this.showStatus("teamwork 已暂停，再按一次 Esc 退出 teamwork 模式；继续输入则留在模式内。");
+				}
 			} else if (this.isBashMode) {
 				this.editor.setText("");
 				this.isBashMode = false;
 				this.updateEditorBorderColor();
 			} else if (!this.editor.getText().trim()) {
+				if (this.teamworkMode) {
+					const now = Date.now();
+					if (now - this.teamworkLastEscapeTime < 500) {
+						this.teamworkLastEscapeTime = 0;
+						void this.exitTeamworkMode();
+					} else {
+						this.teamworkLastEscapeTime = now;
+						this.showStatus("再按一次 Esc 退出 teamwork 模式（配置已保存，可用 /teamwork 重进）。");
+					}
+					return;
+				}
 				// Double-escape with empty editor triggers /tree, /fork, or nothing based on setting
 				const action = this.settingsManager.getDoubleEscapeAction();
 				if (action !== "none") {
@@ -3091,9 +3144,9 @@ export class InteractiveMode {
 
 			// Handle commands
 			if (text === "/teamwork" || text.startsWith("/teamwork ")) {
-				const goal = text.startsWith("/teamwork ") ? text.slice("/teamwork ".length).trim() : undefined;
+				const rawArgs = text.startsWith("/teamwork ") ? text.slice("/teamwork ".length) : undefined;
 				this.editor.setText("");
-				await this.handleTeamworkCommand(goal ? goal : undefined);
+				await this.handleTeamworkCommand(rawArgs);
 				return;
 			}
 			if (text === "/settings") {
@@ -3314,6 +3367,7 @@ export class InteractiveMode {
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
+				if (this.teamworkMode) this.layoutTeamworkSide();
 				if (this.workingVisible) {
 					if (this.activeStatusIndicator?.kind !== "working") {
 						this.showWorkingStatusIndicator();
@@ -3527,15 +3581,15 @@ export class InteractiveMode {
 						if (teamwork.type === "teamwork.started") {
 							const currentRunId = this.teamworkPanel?.getRunId();
 							if (currentRunId !== undefined && currentRunId !== teamwork.runId) {
-								this.teamworkContainer.clear();
 								this.teamworkPanel = undefined;
 							}
 						}
 						if (!this.teamworkPanel) {
 							this.teamworkPanel = new TeamworkPanelComponent(undefined, this.ui);
-							this.teamworkContainer.addChild(this.teamworkPanel);
 						}
+						// Update first so the sidebar paints the current event, not the previous one.
 						this.teamworkPanel.updateFromEvent(teamwork);
+						this.layoutTeamworkSide();
 					}
 				}
 				break;
@@ -3556,6 +3610,7 @@ export class InteractiveMode {
 						this.teamworkPanel.updateFromEvent(teamwork);
 					}
 					this.teamworkPanel.collapse();
+					this.layoutTeamworkSide();
 				}
 				break;
 			}
@@ -3572,6 +3627,7 @@ export class InteractiveMode {
 				}
 				this.pendingTools.clear();
 
+				if (this.teamworkMode) this.layoutTeamworkSide();
 				this.ui.requestRender();
 				break;
 
@@ -4394,6 +4450,8 @@ export class InteractiveMode {
 	private updateEditorBorderColor(): void {
 		if (this.isBashMode) {
 			this.editor.borderColor = theme.getBashModeBorderColor();
+		} else if (this.teamworkMode) {
+			this.editor.borderColor = (text: string) => theme.fg("accent", text);
 		} else {
 			const level = this.session.thinkingLevel || "off";
 			this.editor.borderColor = theme.getThinkingBorderColor(level);
@@ -5069,41 +5127,386 @@ export class InteractiveMode {
 		});
 	}
 
-	private async handleTeamworkCommand(goal?: string): Promise<void> {
-		if (goal) {
-			const summary = buildRoleBindingSummary(this.settingsManager.getRoleModels());
-			this.showStatus(`teamwork goal: ${goal}\nUsage: /teamwork to configure role models\n${summary}`);
+	private buildTeamworkWizardDeps(): TeamworkWizardDeps {
+		return {
+			showSelector: (render) => {
+				this.showSelector((done) => {
+					const created = render(done);
+					const component = created.component as Component;
+					return { component, focus: component };
+				});
+			},
+			createModelSelector: (onSelect, onCancel, defaultModel) => {
+				return new ModelSelectorComponent(
+					this.ui,
+					this.session.model,
+					this.session.modelRuntime,
+					this.session.scopedModels,
+					(model) => onSelect({ provider: model.provider, id: model.id }),
+					onCancel,
+					undefined,
+					undefined,
+					defaultModel,
+				);
+			},
+			settingsManager: this.settingsManager,
+			notify: (message) => this.showStatus(message),
+			askYesNo: (message) => this.showExtensionConfirm("Teamwork", message),
+			inputRoleId: (suggestion) => this.showExtensionInput("新 worker 编号", suggestion),
+			selectThinking: (model, current) => this.showTeamworkThinkingSelector(model, current),
+		};
+	}
+
+	private async showTeamworkThinkingSelector(
+		model: { provider: string; id: string },
+		current?: ThinkingLevel,
+	): Promise<ThinkingLevel | undefined> {
+		const snapshot =
+			this.session.scopedModels.length > 0
+				? this.session.scopedModels.map((scoped) => scoped.model)
+				: [...this.session.modelRuntime.getAvailableSnapshot()];
+		const found = findExactModelReferenceMatch(`${model.provider}/${model.id}`, snapshot);
+		const levels = (found ? getSupportedThinkingLevels(found) : [...THINKING_LEVEL_OPTIONS]) as ThinkingLevel[];
+		if (levels.length <= 1) {
+			this.showStatus(`teamwork: ${model.provider}/${model.id} 仅支持 off，不可调思考强度`);
+			return undefined;
+		}
+		return new Promise((resolve) => {
+			this.showSelector((done) => {
+				const selector = new ThinkingSelectorComponent(
+					current ?? "off",
+					levels,
+					(level) => {
+						done();
+						resolve(level);
+					},
+					() => {
+						done();
+						resolve(undefined);
+					},
+				);
+				return { component: selector, focus: selector };
+			});
+		});
+	}
+
+	private async handleTeamworkSidebarRole(role: string): Promise<void> {
+		try {
+			await this.runTeamworkSidebarRole(role);
+		} catch (error) {
+			this.showError(`teamwork 重配失败：${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	private async runTeamworkSidebarRole(role: string): Promise<void> {
+		const deps = this.buildTeamworkWizardDeps();
+		if (role === "leader") {
+			await runConfigureLeaderChoice(deps);
+			if (this.settingsManager.getRoleModels()?.leader) {
+				await this.applyTeamworkLeaderOverride();
+			} else {
+				await this.restoreTeamworkPreviousModel();
+				this.restoreTeamworkLeaderThinking();
+			}
+		} else if (role === "workers") {
+			const workers = Object.keys(this.settingsManager.getRoleModels() ?? {}).filter(
+				(r) => r !== "leader" && r !== "reviewer",
+			);
+			if (workers.length === 0) {
+				await runAddWorkers(this.buildTeamworkWizardDeps());
+			} else {
+				// Workers are one row each; the aggregate entry is kept for compatibility.
+				for (const worker of workers) {
+					if (await this.showExtensionConfirm("Teamwork", `Reconfigure ${worker}?`)) {
+						await runReconfigureRole(deps, worker);
+					}
+				}
+			}
+		} else {
+			await runReconfigureRole(deps, role);
+		}
+		this.updateTeamworkModeUI();
+	}
+
+	private buildTeamworkBannerLine(): string {
+		return theme.bold(theme.fg("accent", "【teamwork】· Esc×2退出"));
+	}
+
+	private buildTeamworkSidebarData(): TeamworkSidebarData {
+		const runId = this.teamworkPanel?.getRunId();
+		const sessionName = this.sessionManager.getSessionName();
+		const cwd = formatCwdForFooter(this.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
+		const branch = this.footerDataProvider.getGitBranch();
+		const sessionLine = `${sessionName ?? cwd}${branch ? ` (${branch})` : ""}`;
+		const totals = createUsageTotals();
+		for (const entry of this.sessionManager.getEntries()) {
+			if (entry.type === "usage") {
+				addUsageToTotals(totals, entry.usage);
+			} else if (entry.type === "message" && entry.message.role === "assistant") {
+				addUsageToTotals(totals, entry.message.usage);
+			} else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
+				addUsageToTotals(totals, entry.message.usage);
+			}
+		}
+		const totalTokens = totals.input + totals.output + totals.cacheRead + totals.cacheWrite;
+		const percent = this.session.getContextUsage()?.percent;
+		const contextLine = `${formatTokens(totalTokens)} tokens · ${typeof percent === "number" ? `${percent.toFixed(1)}%` : "?"} used`;
+		const model = this.session.model;
+		const thinking = model?.reasoning === true ? ` · ${this.session.thinkingLevel || "off"}` : "";
+		const modelLine = model ? `(${model.provider}) ${model.id}${thinking}` : "no-model";
+		const extensionLines = [...this.footerDataProvider.getExtensionStatuses().values()].slice(0, 4);
+		const snapshot = this.teamworkPanel?.getSnapshot();
+		const workerDescriptions = this.teamworkWorkerDescriptions();
+		return {
+			sessionLine,
+			contextLine,
+			modelLine,
+			roleModels: this.settingsManager.getRoleModels(),
+			sessionModel: {
+				provider: this.session.model?.provider ?? "?",
+				id: this.session.model?.id ?? "?",
+				thinkingLevel: this.session.thinkingLevel,
+			},
+			...(runId === undefined ? {} : { runLine: `· ${runId} 运行中` }),
+			...(extensionLines.length === 0 ? {} : { extensionLines }),
+			...(Object.keys(workerDescriptions).length === 0 ? {} : { workerDescriptions }),
+			...(snapshot === undefined ? {} : { statuses: toTeamworkMemberStatuses(snapshot) }),
+			// The sidebar spans the fullscreen height; keep a row for the terminal prompt.
+			viewportHeight: Math.max(8, this.ui.terminal.rows - 1),
+			spinning: this.session.isStreaming,
+		};
+	}
+
+	/** Worker work descriptions the leader named, keyed by worker role id. */
+	private teamworkWorkerDescriptions(): Record<string, string> {
+		const descriptions: Record<string, string> = {};
+		for (const member of this.teamworkPanel?.getSnapshot()?.members ?? []) {
+			if (member.kind === "worker" && member.roleId !== undefined && member.description !== undefined) {
+				descriptions[member.roleId] = member.description;
+			}
+		}
+		return descriptions;
+	}
+
+	private layoutTeamworkSide(): void {
+		this.teamworkContainer.clear();
+		// The fullscreen side slot applies its own width gate; gate the inline
+		// (regular-mode) rendering here so narrow screens are not squeezed.
+		const showRoster = this.teamworkMode && shouldShowTeamSide(true, this.ui.terminal.columns);
+		if (showRoster) {
+			if (!this.teamworkSidebar)
+				this.teamworkSidebar = new TeamworkSidebarComponent(this.ui, this.buildTeamworkSidebarData(), (role) => {
+					void this.handleTeamworkSidebarRole(role);
+				});
+			this.teamworkSidebar.setRunPanel(this.teamworkPanel);
+			this.teamworkSidebar.setData(this.buildTeamworkSidebarData());
+			this.teamworkContainer.addChild(this.teamworkSidebar);
+		} else {
+			if (this.teamworkSidebar) {
+				this.teamworkSidebar.dispose();
+				this.teamworkSidebar = undefined;
+			}
+			if (this.teamworkPanel) this.teamworkContainer.addChild(this.teamworkPanel);
+		}
+	}
+
+	private updateTeamworkModeUI(): void {
+		const key = InteractiveMode.TEAMWORK_MODE_WIDGET_KEY;
+		if (this.teamworkMode) {
+			const container = new Container();
+			container.addChild(new Text(this.buildTeamworkBannerLine(), 0, 0));
+			const old = this.extensionWidgetsAbove.get(key);
+			old?.dispose?.();
+			this.extensionWidgetsAbove.set(key, container);
+		} else {
+			const old = this.extensionWidgetsAbove.get(key);
+			if (old) {
+				old.dispose?.();
+				this.extensionWidgetsAbove.delete(key);
+			}
+		}
+		this.renderWidgets();
+		this.layoutTeamworkSide();
+		this.updateEditorBorderColor();
+		this.ui.requestRender();
+	}
+
+	private async applyTeamworkLeaderOverride(): Promise<void> {
+		const override = this.settingsManager.getRoleModels()?.leader;
+		if (!override || !this.session.model) return;
+		if (this.session.model.provider === override.provider && this.session.model.id === override.model) return;
+		this.teamworkPreviousModel = { provider: this.session.model.provider, id: this.session.model.id };
+		const target = await this.findExactModelMatch(`${override.provider}/${override.model}`);
+		if (!target) {
+			this.showStatus(`teamwork leader ${override.provider}/${override.model} 未找到，沿用当前模型`);
+			this.teamworkPreviousModel = undefined;
 			return;
 		}
-		await runTeamworkSetupWizard(
-			{
-				showSelector: (render) => {
-					this.showSelector((done) => {
-						const created = render(done);
-						const component = created.component as Component;
-						return { component, focus: component };
-					});
-				},
-				createModelSelector: (onSelect, onCancel, defaultModel) => {
-					return new ModelSelectorComponent(
-						this.ui,
-						this.session.model,
-						this.session.modelRuntime,
-						this.session.scopedModels,
-						(model) => onSelect({ provider: model.provider, id: model.id }),
-						onCancel,
-						undefined,
-						undefined,
-						defaultModel,
-					);
-				},
-				settingsManager: this.settingsManager,
-				notify: (message) => this.showStatus(message),
-				askYesNo: (message) => this.showExtensionConfirm("Teamwork", message),
-				inputRoleId: () => this.showExtensionInput("New worker role id", "e.g. worker-frontend"),
-			},
-			this.settingsManager.getRoleModels(),
+		try {
+			await this.session.setModel(target, { persist: false });
+			this.applyTeamworkLeaderThinking(override.thinkingLevel);
+			this.footer.invalidate();
+		} catch (error) {
+			this.showStatus(`teamwork leader 切换失败：${error instanceof Error ? error.message : String(error)}`);
+			this.teamworkPreviousModel = undefined;
+			this.teamworkPreviousThinking = undefined;
+		}
+	}
+
+	private applyTeamworkLeaderThinking(level: ThinkingLevel | undefined): void {
+		if (level === undefined || level === "off") return;
+		this.teamworkPreviousThinking = this.session.thinkingLevel;
+		try {
+			this.session.setThinkingLevel(level, { persist: false });
+		} catch {
+			this.teamworkPreviousThinking = undefined;
+		}
+	}
+
+	private restoreTeamworkLeaderThinking(): void {
+		const prev = this.teamworkPreviousThinking;
+		this.teamworkPreviousThinking = undefined;
+		if (prev === undefined) return;
+		try {
+			this.session.setThinkingLevel(prev, { persist: false });
+		} catch {
+			// Keep current thinking level on restore failure.
+		}
+	}
+
+	private async restoreTeamworkPreviousModel(): Promise<void> {
+		const prev = this.teamworkPreviousModel;
+		this.teamworkPreviousModel = undefined;
+		if (!prev || !this.session.model) return;
+		if (this.session.model.provider === prev.provider && this.session.model.id === prev.id) return;
+		const cached =
+			this.session.scopedModels.length > 0
+				? this.session.scopedModels.map((scoped) => scoped.model)
+				: [...this.session.modelRuntime.getAvailableSnapshot()];
+		const target = findExactModelReferenceMatch(`${prev.provider}/${prev.id}`, cached);
+		if (!target) return;
+		try {
+			await this.session.setModel(target, { persist: false });
+			this.footer.invalidate();
+		} catch {
+			// Keep current model on restore failure; mode exit already reported.
+		}
+	}
+
+	private async offerTeamworkWorkerSetup(): Promise<void> {
+		const hasWorkers = Object.keys(this.settingsManager.getRoleModels() ?? {}).some(
+			(role) => role !== "leader" && role !== "reviewer",
 		);
+		if (hasWorkers) return;
+		await runAddWorkers(this.buildTeamworkWizardDeps());
+	}
+
+	private async enterTeamworkMode(): Promise<void> {
+		if (!this.teamworkMode) this.activateTeamworkMode();
+		await runTeamworkInitialSetup(this.buildTeamworkWizardDeps(), this.settingsManager.getRoleModels());
+		await this.applyTeamworkLeaderOverride();
+		await this.offerTeamworkWorkerSetup();
+		this.updateTeamworkModeUI();
+		const summary = buildRoleBindingSummary(this.settingsManager.getRoleModels());
+		this.showStatus(
+			`已进入 teamwork 模式\n${summary}\n直接输入目标开始分工；leader 会按 worker1（工作）命名，缺模型时会逐个让你选择。`,
+		);
+	}
+
+	/** Turn teamwork mode on and install everything the mode needs, whatever turned it on. */
+	private activateTeamworkMode(): void {
+		this.teamworkMode = true;
+		this.ensureTeamworkFullscreen();
+		this.installTeamworkWorkerBindingsHook();
+		this.updateTeamworkModeUI();
+	}
+
+	/**
+	 * The leader names workers while the teamwork tool runs; this hook lets that call ask
+	 * the user for a model per unbound worker instead of failing with an unknown role.
+	 */
+	private installTeamworkWorkerBindingsHook(): void {
+		this.session.setTeamworkWorkerBindingsHook(async (roles, labels) => {
+			await ensureWorkerBindings(this.buildTeamworkWizardDeps(), roles, labels);
+			if (this.teamworkMode) this.layoutTeamworkSide();
+		});
+	}
+
+	private async exitTeamworkMode(): Promise<void> {
+		if (!this.teamworkMode) return;
+		this.teamworkMode = false;
+		this.session.setTeamworkWorkerBindingsHook(undefined);
+		await this.restoreTeamworkPreviousModel();
+		this.restoreTeamworkLeaderThinking();
+		this.restoreTeamworkTuiMode();
+		this.footer.invalidate();
+		this.updateTeamworkModeUI();
+		this.showStatus("已退出 teamwork 模式");
+	}
+
+	/**
+	 * The isolated right sidebar only exists in fullscreen mode (the HStack side
+	 * slot); regular mode stacks everything vertically. Enter fullscreen on mode
+	 * entry so the sidebar is visible, restoring the previous mode on exit.
+	 * The persisted settings value is untouched.
+	 */
+	private ensureTeamworkFullscreen(): void {
+		if (this.ui.mode === "fullscreen") {
+			this.teamworkPreviousTuiMode = undefined;
+			return;
+		}
+		this.teamworkPreviousTuiMode = this.ui.mode;
+		if (!this.switchTuiMode("fullscreen")) this.teamworkPreviousTuiMode = undefined;
+	}
+
+	private restoreTeamworkTuiMode(): void {
+		const prev = this.teamworkPreviousTuiMode;
+		this.teamworkPreviousTuiMode = undefined;
+		if (!prev || this.ui.mode === prev) return;
+		this.switchTuiMode(prev);
+	}
+
+	private async handleTeamworkCommand(rawArgs?: string): Promise<void> {
+		const args = (rawArgs ?? "").trim();
+		const [sub, ...rest] = args.split(/\s+/).filter(Boolean);
+		if (sub === "exit" || sub === "off" || sub === "quit") {
+			await this.exitTeamworkMode();
+			return;
+		}
+		if (sub === "thinking") {
+			if (rest.length === 0 || rest[0] === undefined) {
+				this.showStatus("用法：/teamwork thinking <role>（例如 /teamwork thinking worker-a）");
+				return;
+			}
+			if (!this.teamworkMode) this.activateTeamworkMode();
+			await runSetThinkingOnly(this.buildTeamworkWizardDeps(), rest[0]);
+			this.updateTeamworkModeUI();
+			return;
+		}
+		if (sub === "bind") {
+			if (rest.length === 0) {
+				this.showStatus("用法：/teamwork bind <worker…>（例如 /teamwork bind worker1 worker2）");
+				return;
+			}
+			if (!this.teamworkMode) this.activateTeamworkMode();
+			await ensureWorkerBindings(this.buildTeamworkWizardDeps(), rest);
+			this.updateTeamworkModeUI();
+			return;
+		}
+		if (!this.teamworkMode) {
+			await this.enterTeamworkMode();
+			return;
+		}
+		if (sub !== undefined && sub !== "") {
+			const summary = buildRoleBindingSummary(this.settingsManager.getRoleModels());
+			this.showStatus(
+				`teamwork 模式中：直接输入目标即可分工；/teamwork 重配团队，/teamwork bind <role…> 配 worker，/teamwork exit 退出\n${summary}`,
+			);
+			return;
+		}
+		await runTeamworkSetupWizard(this.buildTeamworkWizardDeps(), this.settingsManager.getRoleModels());
+		await this.applyTeamworkLeaderOverride();
+		this.updateTeamworkModeUI();
 	}
 
 	private async handleModelCommand(searchTerm?: string): Promise<void> {

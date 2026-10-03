@@ -94,4 +94,31 @@ describe("teamwork panel formatPanelLines", () => {
 	it("returns zero lines for undefined state", () => {
 		expect(formatPanelLines(undefined, { expandedRoleIds: new Set() })).toEqual([]);
 	});
+
+	it("renders vertical flow connectors and token lines with cache on expand", () => {
+		let state = initPanelState("run-1", "ship it", team);
+		state = applyTeamworkEvent(state, {
+			type: "member.completed",
+			runId: "run-1",
+			roleId: "worker-a",
+			provider: "openai",
+			model: "gpt-5-mini",
+			taskId: "t1",
+			summary: "API done",
+			usage: { input: 100, output: 40, cacheRead: 10, cacheWrite: 2, total: 152 },
+		});
+		const collapsed = formatPanelLines(state, { expandedRoleIds: new Set() });
+		expect(collapsed).toContain("│");
+		expect(collapsed).toContain("▼");
+		expect(collapsed).toContain("  tokens: in 100 · out 40 · total 152");
+		expect(collapsed.join("\n")).not.toContain("cache: read");
+		const expanded = formatPanelLines(state, { expandedRoleIds: new Set(["worker-a"]) });
+		expect(expanded.join("\n")).toContain("cache: read 10 · write 2");
+	});
+
+	it("shows placeholder token line when usage is missing", () => {
+		const state = initPanelState("run-1", "ship it", team);
+		const lines = formatPanelLines(state, { expandedRoleIds: new Set() });
+		expect(lines).toContain("  tokens: —");
+	});
 });

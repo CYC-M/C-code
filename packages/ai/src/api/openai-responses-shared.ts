@@ -785,9 +785,9 @@ function mapStopReason(
 		case "in_progress":
 		case "queued":
 			return { stopReason: "stop" };
-		default: {
-			const _exhaustive: never = status;
-			throw new Error(`Unhandled stop reason: ${_exhaustive}`);
-		}
+		default:
+			// The API may add statuses. An unknown one must not fail the request: the response
+			// content is still usable, so report it as an error instead of throwing.
+			return { stopReason: "error", errorMessage: `Provider response status: ${status}` };
 	}
 }

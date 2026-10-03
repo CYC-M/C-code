@@ -1,6 +1,13 @@
 import { Container, MouseRegion, Text, type TUI } from "@earendil-works/pi-tui";
-import { applyTeamworkEvent, initPanelState, type TeamworkPanelState } from "../../../core/teamwork/panel.ts";
-import type { TeamMemberStatus, TeamworkEvent } from "../../../core/teamwork/types.ts";
+import { formatWorkerLabel } from "../../../core/teamwork/naming.ts";
+import {
+	applyTeamworkEvent,
+	initPanelState,
+	type PanelMember,
+	type TeamworkPanelState,
+} from "../../../core/teamwork/panel.ts";
+import type { TeamMemberStatus, TeamUsage, TeamworkEvent } from "../../../core/teamwork/types.ts";
+import { theme } from "../theme/theme.ts";
 
 export interface FormatPanelOptions {
 	expandedRoleIds: Set<string>;
@@ -59,8 +66,48 @@ function leaderRow(state: TeamworkPanelState): string | undefined {
 	return `Leader · ${leader.provider}/${leader.model} · ${leaderLabel(leader.status)}`;
 }
 
-function workerRow(roleId: string, provider: string, model: string, status: TeamMemberStatus): string {
-	return `${roleId} · ${provider}/${model} · ${statusGlyph(status)} ${formatStatus(status)}`;
+function workerRow(
+	roleId: string,
+	provider: string,
+	model: string,
+	status: TeamMemberStatus,
+	description?: string,
+): string {
+	return `${formatWorkerLabel(roleId, description)} · ${provider}/${model} · ${statusGlyph(status)} ${formatStatus(status)}`;
+}
+
+export function formatTokensShort(usage: TeamUsage | undefined): string {
+	if (!usage) return "tokens: —";
+	return `tokens: in ${usage.input} · out ${usage.output} · total ${usage.total}`;
+}
+
+export function formatTokensCache(usage: TeamUsage | undefined): string | undefined {
+	if (!usage) return undefined;
+	return `cache: read ${usage.cacheRead} · write ${usage.cacheWrite}`;
+}
+
+function tokenLine(usage: TeamUsage | undefined): string {
+	return `  ${formatTokensShort(usage)}`;
+}
+
+function styleRow(text: string, status: TeamMemberStatus): string {
+	switch (status) {
+		case "working":
+		case "reviewing":
+			return theme.bold(theme.fg("accent", text));
+		case "failed":
+			return theme.fg("error", text);
+		case "needs_fix":
+			return theme.fg("warning", text);
+		case "pending":
+			return theme.fg("dim", text);
+		default:
+			return text;
+	}
+}
+
+function styleDim(text: string): string {
+	return theme.fg("dim", text);
 }
 
 function workerDetailLines(
@@ -97,18 +144,33 @@ export function formatPanelLines(state: TeamworkPanelState | undefined, opts: Fo
 	const lines: string[] = [headerLine(state)];
 	const leader = leaderRow(state);
 	if (leader) lines.push(leader);
+	lines.push("│");
+	lines.push("▼");
 	lines.push("Workers");
 	const workers = state.members.filter((m) => m.kind === "worker");
 	const shown = workers.slice(0, maxWorkers);
 	for (const w of shown) {
-		lines.push(workerRow(w.roleId ?? "?", w.provider, w.model, w.status));
+		lines.push(workerRow(w.roleId ?? "?", w.provider, w.model, w.status, w.description));
+		lines.push(tokenLine(w.usage));
 		if (w.roleId && opts.expandedRoleIds.has(w.roleId)) {
 			lines.push(...workerDetailLines(w.taskTitle, w.taskId, w.provider, w.model, w.status, w.summary));
+			const cache = formatTokensCache(w.usage);
+			if (cache !== undefined) lines.push(`  ${cache}`);
 		}
 	}
 	if (workers.length > shown.length) lines.push(`…${workers.length - shown.length} more`);
+	lines.push("│");
+	lines.push("▼");
 	const reviewer = reviewerRow(state);
-	if (reviewer) lines.push(reviewer);
+	if (reviewer) {
+		lines.push(reviewer);
+		const reviewerMember = state.members.find((m) => m.kind === "reviewer");
+		lines.push(tokenLine(reviewerMember?.usage));
+		if (opts.expandedRoleIds.has("reviewer")) {
+			const cache = formatTokensCache(reviewerMember?.usage);
+			if (cache !== undefined) lines.push(`  ${cache}`);
+		}
+	}
 	return lines;
 }
 
@@ -127,6 +189,10 @@ export class TeamworkPanelComponent extends Container {
 
 	getRunId(): string | undefined {
 		return this.state?.runId;
+	}
+
+	getSnapshot(): TeamworkPanelState | undefined {
+		return this.state;
 	}
 
 	updateFromEvent(event: TeamworkEvent): void {
@@ -159,8 +225,10 @@ export class TeamworkPanelComponent extends Container {
 		this.tui.requestRender();
 	}
 
-	private addWorkerRow(roleId: string, provider: string, model: string, status: TeamMemberStatus): void {
-		const row = new Text(workerRow(roleId, provider, model, status), 0, 0);
+	private addMemberRow(member: PanelMember, displayName: string): void {
+		const text = workerRow(displayName, member.provider, member.model, member.status);
+		const row = new Text(styleRow(text, member.status), 0, 0);
+		const roleId = member.roleId ?? (member.kind === "reviewer" ? "reviewer" : displayName);
 		this.addChild(
 			new MouseRegion(row, (event) => {
 				if (event.type !== "click" || event.button !== "left") return undefined;
@@ -168,6 +236,10 @@ export class TeamworkPanelComponent extends Container {
 				return { handled: true };
 			}),
 		);
+	}
+
+	private addTokenLine(usage: TeamUsage | undefined): void {
+		this.addChild(new Text(styleDim(tokenLine(usage)), 0, 0));
 	}
 
 	private rebuild(): void {
@@ -178,23 +250,49 @@ export class TeamworkPanelComponent extends Container {
 			this.addChild(new Text(headerLine(state), 0, 0));
 			return;
 		}
-		this.addChild(new Text(headerLine(state), 0, 0));
-		const leader = leaderRow(state);
-		if (leader) this.addChild(new Text(leader, 0, 0));
-		this.addChild(new Text("Workers", 0, 0));
+		this.addChild(new Text(styleDim(headerLine(state)), 0, 0));
+		const leader = state.members.find((m) => m.kind === "leader");
+		if (leader) {
+			const text = `Leader · ${leader.provider}/${leader.model} · ${leaderLabel(leader.status)}`;
+			this.addChild(new Text(styleRow(text, leader.status), 0, 0));
+		}
+		this.addChild(new Text(styleDim("│"), 0, 0));
+		this.addChild(new Text(styleDim("▼"), 0, 0));
+		this.addChild(new Text(styleDim("Workers"), 0, 0));
 		const workers = state.members.filter((m) => m.kind === "worker");
 		const shown = workers.slice(0, DEFAULT_MAX_WORKERS);
 		for (const w of shown) {
 			const roleId = w.roleId ?? "?";
-			this.addWorkerRow(roleId, w.provider, w.model, w.status);
+			this.addMemberRow(w, roleId);
+			this.addTokenLine(w.usage);
 			if (w.roleId && this.expandedRoleIds.has(w.roleId)) {
 				for (const line of workerDetailLines(w.taskTitle, w.taskId, w.provider, w.model, w.status, w.summary)) {
-					this.addChild(new Text(line, 0, 0));
+					this.addChild(new Text(styleDim(line), 0, 0));
 				}
+				const cache = formatTokensCache(w.usage);
+				if (cache !== undefined) this.addChild(new Text(styleDim(`  ${cache}`), 0, 0));
 			}
 		}
-		if (workers.length > shown.length) this.addChild(new Text(`…${workers.length - shown.length} more`, 0, 0));
-		const reviewer = reviewerRow(state);
-		if (reviewer) this.addChild(new Text(reviewer, 0, 0));
+		if (workers.length > shown.length)
+			this.addChild(new Text(styleDim(`…${workers.length - shown.length} more`), 0, 0));
+		this.addChild(new Text(styleDim("│"), 0, 0));
+		this.addChild(new Text(styleDim("▼"), 0, 0));
+		const reviewer = state.members.find((m) => m.kind === "reviewer");
+		if (reviewer) {
+			const text = `Reviewer · ${reviewer.provider}/${reviewer.model} · ${statusGlyph(reviewer.status)} ${formatStatus(reviewer.status)}`;
+			const row = new Text(styleRow(text, reviewer.status), 0, 0);
+			this.addChild(
+				new MouseRegion(row, (event) => {
+					if (event.type !== "click" || event.button !== "left") return undefined;
+					this.toggleWorker("reviewer");
+					return { handled: true };
+				}),
+			);
+			this.addTokenLine(reviewer.usage);
+			if (this.expandedRoleIds.has("reviewer")) {
+				const cache = formatTokensCache(reviewer.usage);
+				if (cache !== undefined) this.addChild(new Text(styleDim(`  ${cache}`), 0, 0));
+			}
+		}
 	}
 }

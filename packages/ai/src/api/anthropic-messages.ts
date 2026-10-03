@@ -1514,7 +1514,8 @@ function mapStopReason(
 		case "sensitive": // Content flagged by safety filters (not yet in SDK types)
 			return { stopReason: "error", errorMessage: "Provider stopped with: sensitive" };
 		default:
-			// Handle unknown stop reasons gracefully (API may add new values)
-			throw new Error(`Unhandled stop reason: ${reason}`);
+			// The API may add stop reasons. An unknown one must not fail the request: the
+			// response content is still usable, so report it as an error instead of throwing.
+			return { stopReason: "error", errorMessage: `Provider stop_reason: ${reason}` };
 	}
 }

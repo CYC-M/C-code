@@ -7,15 +7,27 @@ import { defineTool } from "../extensions/types.ts";
 import type { SessionManager } from "../session-manager.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import { summarizeResults } from "../teamwork/context.ts";
+import {
+	canonicalizeWorkerTaskRoles,
+	formatWorkerLabel,
+	workerDescriptionsInTasks,
+	workerRolesInTasks,
+} from "../teamwork/naming.ts";
 import { runTeamRound, type WorkerModelClient } from "../teamwork/orchestrator.ts";
 import { assembleTeamConfig } from "../teamwork/roles.ts";
 import { continueRun, createRun } from "../teamwork/state.ts";
-import type { TeamRunState, TeamworkEvent } from "../teamwork/types.ts";
+import type { RoleModelRef, TeamRunState, TeamTask, TeamworkEvent } from "../teamwork/types.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 export interface TeamworkToolOptions {
 	sessionManager?: SessionManager;
 	settingsManager?: SettingsManager;
+	/**
+	 * Ask the user to bind a model for each worker the leader proposed but that has no
+	 * binding yet. The interactive mode supplies this; headless callers leave it unset and
+	 * get an actionable error instead.
+	 */
+	ensureWorkerBindings?: (roles: readonly string[], labels: Record<string, string>) => Promise<void>;
 }
 
 const teamworkSchema = Type.Object({
@@ -26,6 +38,7 @@ const teamworkSchema = Type.Object({
 			title: Type.String(),
 			goal: Type.String(),
 			role: Type.String(),
+			roleDescription: Type.Optional(Type.String()),
 			dependsOn: Type.Optional(Type.Array(Type.String())),
 			inputs: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 			successCriteria: Type.Array(Type.String()),
@@ -36,6 +49,25 @@ const teamworkSchema = Type.Object({
 	),
 	continueRunId: Type.Optional(Type.String()),
 });
+
+/**
+ * Worker roles used by the tasks that still have no model binding. Roles the user
+ * configured are bound by definition; canonicalization leaves only workerN unknowns.
+ */
+function unboundWorkerRoles(
+	roleModels: Record<string, RoleModelRef> | undefined,
+	tasks: readonly TeamTask[],
+): string[] {
+	const bound = new Set(Object.keys(roleModels ?? {}));
+	return workerRolesInTasks(tasks).filter((role) => !bound.has(role));
+}
+
+function unboundWorkersError(roles: readonly string[], labels: Record<string, string>): Error {
+	const names = roles.map((role) => formatWorkerLabel(role, labels[role])).join(", ");
+	return new Error(
+		`teamwork: no model configured for ${names}. Run /teamwork bind ${roles.join(" ")} to pick a model per worker, then call teamwork again.`,
+	);
+}
 
 function assertValidPriorRun(data: unknown, runId: string): asserts data is TeamRunState {
 	const budget = (data as { budget?: unknown }).budget as Record<string, unknown> | undefined;
@@ -98,6 +130,24 @@ function teamworkEventLine(event: TeamworkEvent): string {
 	}
 }
 
+function formatUsageSummary(final: TeamRunState): string | undefined {
+	const parts: string[] = [];
+	for (const r of Object.values(final.results)) {
+		if (r.usage === undefined) continue;
+		parts.push(
+			`${r.taskId} (${r.model.provider}/${r.model.id}): in ${r.usage.input} out ${r.usage.output} cacheR ${r.usage.cacheRead} cacheW ${r.usage.cacheWrite} total ${r.usage.total}`,
+		);
+	}
+	const review = final.reviews[final.reviews.length - 1];
+	if (review?.usage !== undefined) {
+		parts.push(
+			`review: in ${review.usage.input} out ${review.usage.output} cacheR ${review.usage.cacheRead} cacheW ${review.usage.cacheWrite} total ${review.usage.total}`,
+		);
+	}
+	if (parts.length === 0) return undefined;
+	return `Tokens:\n${parts.map((p) => `- ${p}`).join("\n")}`;
+}
+
 export function createTeamworkToolDefinition(
 	cwd: string,
 	options?: TeamworkToolOptions,
@@ -107,7 +157,7 @@ export function createTeamworkToolDefinition(
 		name: "teamwork",
 		label: "teamwork",
 		description:
-			"Delegate a goal to a dynamic team: serial workers with scoped contexts plus a reviewer. Pass tasks with role ids configured via /teamwork. Returns a compact structured summary; full state is persisted to the session. To retry within the original budget, pass continueRunId with revised tasks to continue within the original budget.",
+			"Delegate a goal to a dynamic team: serial workers with scoped contexts plus a reviewer. Name workers worker1, worker2, ... in order and describe each worker's job in roleDescription (shown as worker1（UI designer）). Workers without a model binding are bound by the user when the tool runs. Returns a compact structured summary; full state is persisted to the session. To retry within the original budget, pass continueRunId with revised tasks to continue within the original budget.",
 		promptSnippet: "teamwork: multi-model team delegation with review loop",
 		promptGuidelines: ["Use teamwork when a goal splits into parallelizable subtasks needing different models."],
 		parameters: teamworkSchema,
@@ -118,15 +168,29 @@ export function createTeamworkToolDefinition(
 			if (!Array.isArray(params.tasks) || params.tasks.length === 0) {
 				throw new Error("teamwork: no tasks provided");
 			}
+			const settings = options?.settingsManager;
 			let run: TeamRunState;
 			if (params.continueRunId) {
 				const prior = findPriorRun(ctx, params.continueRunId);
 				if (!prior) throw new Error("teamwork: unknown continueRunId");
-				run = continueRun(prior, params.tasks);
+				// The leader names the workers. Accept whatever it produced: a role the user
+				// already bound is kept, `worker 1（UI designer）` becomes `worker1`, and any
+				// other name becomes the description of the next free worker. This is what
+				// keeps a naming slip from failing the run.
+				const tasks = canonicalizeWorkerTaskRoles(params.tasks, { knownRoles: Object.keys(prior.team.roles) });
+				run = continueRun(prior, tasks);
 			} else {
-				const settings = options?.settingsManager;
+				const roleModels = settings?.getRoleModels();
+				const tasks = canonicalizeWorkerTaskRoles(params.tasks, { knownRoles: Object.keys(roleModels ?? {}) });
+				const missing = unboundWorkerRoles(roleModels, tasks);
+				if (missing.length > 0) {
+					const labels = workerDescriptionsInTasks(tasks);
+					await options?.ensureWorkerBindings?.(missing, labels);
+					const stillMissing = unboundWorkerRoles(settings?.getRoleModels(), tasks);
+					if (stillMissing.length > 0) throw unboundWorkersError(stillMissing, labels);
+				}
 				const team = assembleTeamConfig(settings?.getRoleModels(), params.budget ?? undefined);
-				run = createRun(params.goal, team, params.tasks);
+				run = createRun(params.goal, team, tasks);
 			}
 			const registry = ctx.modelRegistry;
 			const client: WorkerModelClient = {
@@ -138,11 +202,28 @@ export function createTeamworkToolDefinition(
 					const found = registry.find(ref.provider, ref.id);
 					return found ? registry.hasConfiguredAuth(found) : false;
 				},
-				complete: async (ref, context) => {
+				complete: async (ref, context, thinkingLevel) => {
 					const found = registry.find(ref.provider, ref.id);
 					if (!found) throw new Error(`teamwork: model ${ref.provider}/${ref.id} not found`);
-					const response = await registry.complete(found, context);
-					return contentText(response.content);
+					const response =
+						thinkingLevel === undefined || thinkingLevel === "off"
+							? await registry.complete(found, context)
+							: await registry.completeSimple(found, context, { reasoning: thinkingLevel });
+					const usage = response.usage;
+					return {
+						text: contentText(response.content),
+						...(usage === undefined
+							? {}
+							: {
+									usage: {
+										input: usage.input,
+										output: usage.output,
+										cacheRead: usage.cacheRead,
+										cacheWrite: usage.cacheWrite,
+										total: usage.totalTokens,
+									},
+								}),
+					};
 				},
 			};
 			let final: TeamRunState;
@@ -170,6 +251,8 @@ export function createTeamworkToolDefinition(
 				`Team run ${final.runId}: ${final.phase}${final.downgraded ? " (downgraded)" : ""}`,
 				summarizeResults(final.results, final.tasks),
 			];
+			const tokenLines = formatUsageSummary(final);
+			if (tokenLines !== undefined) summary.push(tokenLines);
 			if (haltError) summary.push(`Halted: ${haltError}`);
 			if (review) summary.push(`Review: ${review.verdict} (${review.findings.length} findings)`);
 			return {

@@ -5,6 +5,16 @@
 ### Added
 
 - Added `/teamwork`: multi-model team delegation with a brain → workers → reviewer loop, role↔model bindings in settings, and hard round/call budgets.
+- Added per-worker model prompts: workers the leader names without a binding are bound while the run is prepared, one model selector per worker.
+
+### Changed
+
+- Changed teamwork worker naming to `worker1`, `worker2`, ... with the job in parentheses (`worker1（UI designer）`); unknown names become the description of the next free worker instead of failing the run.
+- Changed the teamwork sidebar to wrap values and fold workers by the available height, and to take a share of the terminal width (30-46 columns) instead of a fixed 40.
+
+### Fixed
+
+- Fixed `/teamwork` runs failing with `unknown role` when the leader named a worker that had no model binding.
 
 ## [0.87.1] - 2026-09-22
 

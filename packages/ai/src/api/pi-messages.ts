@@ -29,6 +29,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord, providerHeadersToRecord } from "../utils/headers.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
+import { retryProviderRequest } from "../utils/provider-retry.ts";
 
 export interface PiMessagesOptions extends StreamOptions {
 	reasoning?: ThinkingLevel;
@@ -98,12 +99,23 @@ type PiMessagesErrorBody = {
 export class PiMessagesResponseError extends Error {
 	code?: string;
 	readonly diagnosticDetails: JsonObject;
+	/** Status and headers in the shape the shared retry policy inspects. */
+	readonly status: number;
+	readonly headers: Headers;
 
-	constructor(message: string, code: string | undefined, diagnosticDetails: JsonObject) {
+	constructor(
+		message: string,
+		code: string | undefined,
+		diagnosticDetails: JsonObject,
+		status: number,
+		headers: Headers,
+	) {
 		super(message);
 		this.name = "PiMessagesResponseError";
 		this.code = code;
 		this.diagnosticDetails = diagnosticDetails;
+		this.status = status;
+		this.headers = headers;
 	}
 }
 
@@ -142,17 +154,23 @@ function createPiMessagesResponseError(
 ): PiMessagesResponseError {
 	const errorBody = parsePiMessagesErrorBody(body);
 	const code = typeof errorBody?.error?.code === "string" ? errorBody.error.code : undefined;
-	return new PiMessagesResponseError(formatPiMessagesResponseError(response, body, errorBody), code, {
-		version: 1,
-		provider: model.provider,
-		model: model.id,
-		url: url.toString(),
-		status: response.status,
-		statusText: response.statusText,
-		...(errorBody?.error === undefined ? {} : { error: errorBody.error as JsonValue }),
-		...(errorBody ? {} : { body: truncateDiagnosticString(body) }),
-		timestampMs: Date.now(),
-	});
+	return new PiMessagesResponseError(
+		formatPiMessagesResponseError(response, body, errorBody),
+		code,
+		{
+			version: 1,
+			provider: model.provider,
+			model: model.id,
+			url: url.toString(),
+			status: response.status,
+			statusText: response.statusText,
+			...(errorBody?.error === undefined ? {} : { error: errorBody.error as JsonValue }),
+			...(errorBody ? {} : { body: truncateDiagnosticString(body) }),
+			timestampMs: Date.now(),
+		},
+		response.status,
+		response.headers,
+	);
 }
 
 function createEmptyUsage(): PiMessagesUsage {
@@ -389,24 +407,36 @@ export const stream: StreamFunction<"pi-messages", PiMessagesOptions> = (
 				payload = nextPayload;
 			}
 
-			const response = await (options?.fetch ?? globalThis.fetch)(url, {
-				method: "POST",
-				headers: {
-					authorization: `Bearer ${apiKey}`,
-					accept: "text/event-stream",
-					"content-type": "application/json",
-					...providerHeadersToRecord(options?.headers),
+			// Throwing inside the retried call lets the shared policy honor `maxRetries`;
+			// with the default of 0 this is still a single attempt.
+			const response = await retryProviderRequest(
+				async () => {
+					const attempt = await (options?.fetch ?? globalThis.fetch)(url, {
+						method: "POST",
+						headers: {
+							authorization: `Bearer ${apiKey}`,
+							accept: "text/event-stream",
+							"content-type": "application/json",
+							...providerHeadersToRecord(options?.headers),
+						},
+						body: JSON.stringify(payload),
+						signal: options?.signal,
+					});
+
+					await options?.onResponse?.(
+						{ status: attempt.status, headers: headersToRecord(attempt.headers) },
+						model,
+					);
+
+					if (!attempt.ok) {
+						const body = await attempt.text();
+						throw createPiMessagesResponseError(model, url, attempt, body);
+					}
+					return attempt;
 				},
-				body: JSON.stringify(payload),
-				signal: options?.signal,
-			});
+				{ maxRetries: options?.maxRetries, maxRetryDelayMs: options?.maxRetryDelayMs, signal: options?.signal },
+			);
 
-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-
-			if (!response.ok) {
-				const body = await response.text();
-				throw createPiMessagesResponseError(model, url, response, body);
-			}
 			if (!response.body) {
 				throw new Error(`${model.provider} response has no body`);
 			}

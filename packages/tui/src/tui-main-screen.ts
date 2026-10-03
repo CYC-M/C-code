@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { deleteKittyImage, isImageLine } from "./terminal-image.ts";
+import { deleteKittyImage, getCapabilities, isImageLine } from "./terminal-image.ts";
 import { type TUI, TuiBase, type TuiStopOptions } from "./tui.ts";
 import { visibleWidth } from "./utils.ts";
 
@@ -175,8 +175,31 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		this.terminal.write("\r\n");
 	}
 
+	/**
+	 * Set once a written line actually carried a kitty graphics sequence. Terminals that
+	 * do not advertise kitty support skip the per-frame bookkeeping scans until a
+	 * component really emits kitty graphics, which keeps those scans off the common path.
+	 */
+	private kittyGraphicsObserved = false;
+
+	/**
+	 * Whether kitty graphics bookkeeping has to run: advertised support, or graphics
+	 * actually seen on screen. Only kitty graphics are tracked through line sequences.
+	 */
+	private get tracksKittyImages(): boolean {
+		return this.kittyGraphicsObserved || getCapabilities().images === "kitty";
+	}
+
+	/** Remember kitty graphics emitted by a written line so later frames keep tracking them. */
+	private observeKittyGraphics(line: string): void {
+		if (!this.kittyGraphicsObserved && line.includes(KITTY_SEQUENCE_PREFIX)) {
+			this.kittyGraphicsObserved = true;
+		}
+	}
+
 	private collectKittyImageIds(lines: string[]): Set<number> {
 		const ids = new Set<number>();
+		if (!this.tracksKittyImages) return ids;
 		for (const line of lines) {
 			for (const id of extractKittyImageIds(line)) {
 				ids.add(id);
@@ -212,6 +235,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		lastChanged: number,
 		newLines: string[],
 	): { firstChanged: number; lastChanged: number } {
+		if (!this.tracksKittyImages) return { firstChanged, lastChanged };
 		let expandedFirstChanged = firstChanged;
 		let expandedLastChanged = lastChanged;
 		const expandForLines = (lines: string[]): void => {
@@ -231,6 +255,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	}
 
 	private deleteChangedKittyImages(firstChanged: number, lastChanged: number): string {
+		if (!this.tracksKittyImages) return "";
 		if (firstChanged < 0 || lastChanged < firstChanged) return "";
 
 		const ids = new Set<number>();
@@ -268,10 +293,10 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			newLines = this.compositeOverlays(newLines, width, height);
 		}
 
-		// Extract cursor position before applying line resets (marker must be found first)
+		// Extract cursor position before writing (the marker must be found first).
+		// Per-line resets are appended at write time, so unchanged lines are never
+		// normalized or reallocated.
 		const cursorPos = this.extractCursorPosition(newLines, height);
-
-		newLines = this.applyLineResets(newLines);
 
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean): void => {
@@ -286,18 +311,19 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				if (i > 0) output.append("\r\n");
 				const line = newLines[i];
 				const isImage = isImageLine(line);
+				if (isImage) this.observeKittyGraphics(line);
 				const imageReservedRows = isImage ? this.getKittyImageReservedRows(newLines, i) : 1;
 				if (imageReservedRows > 1 && imageReservedRows <= height) {
 					for (let row = 1; row < imageReservedRows; row++) {
 						output.append("\r\n");
 					}
 					output.append(`\x1b[${imageReservedRows - 1}A`);
-					output.append(line);
+					output.append(this.applyLineReset(line));
 					output.append(`\x1b[${imageReservedRows - 1}B`);
 					i += imageReservedRows - 1;
 					continue;
 				}
-				output.append(line);
+				output.append(this.applyLineReset(line));
 			}
 			output.append("\x1b[?2026l"); // End synchronized output
 			output.flush();
@@ -491,6 +517,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			if (i > firstChanged) output.append("\r\n");
 			const line = newLines[i];
 			const isImage = isImageLine(line);
+			if (isImage) this.observeKittyGraphics(line);
 			const imageReservedRows = isImage ? this.getKittyImageReservedRows(newLines, i, renderEnd) : 1;
 			if (imageReservedRows > 1) {
 				const imageStartScreenRow = i - viewportTop;
@@ -507,20 +534,22 @@ export class TuiMainScreen extends TuiBase implements TUI {
 					output.append("\r\n\x1b[2K");
 				}
 				output.append(`\x1b[${imageReservedRows - 1}A`);
-				output.append(line);
+				output.append(this.applyLineReset(line));
 				output.append(`\x1b[${imageReservedRows - 1}B`);
 				i += imageReservedRows - 1;
 				continue;
 			}
 
+			// Only changed lines are written, so only they pay normalization and resets.
+			const outputLine = this.applyLineReset(line);
 			output.append("\x1b[2K"); // Clear current line
-			if (!isImage && visibleWidth(line) > width) {
+			if (!isImage && visibleWidth(outputLine) > width) {
 				// Log all lines to crash file for debugging
 				const crashLogPath = path.join(this.logDirectory ?? os.tmpdir(), "pi-tui-crash.log");
 				const crashData = [
 					`Crash at ${new Date().toISOString()}`,
 					`Terminal width: ${width}`,
-					`Line ${i} visible width: ${visibleWidth(line)}`,
+					`Line ${i} visible width: ${visibleWidth(outputLine)}`,
 					"",
 					"=== All rendered lines ===",
 					...newLines.map((l, idx) => `[${idx}] (w=${visibleWidth(l)}) ${l}`),
@@ -533,7 +562,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				this.stop();
 
 				const errorMsg = [
-					`Rendered line ${i} exceeds terminal width (${visibleWidth(line)} > ${width}).`,
+					`Rendered line ${i} exceeds terminal width (${visibleWidth(outputLine)} > ${width}).`,
 					"",
 					"This is likely caused by a custom TUI component not truncating its output.",
 					"Use visibleWidth() to measure and truncateToWidth() to truncate lines.",
@@ -542,7 +571,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				].join("\n");
 				throw new Error(errorMsg);
 			}
-			output.append(line);
+			output.append(outputLine);
 		}
 
 		// Track where cursor ended up after rendering
