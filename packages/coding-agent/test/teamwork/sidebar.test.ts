@@ -1,7 +1,9 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import {
+	formatMcpServerRow,
 	formatTeamworkSidebarRows,
 	TeamworkSidebarComponent,
+	teamworkAgentModeFromTheme,
 	toTeamworkMemberStatuses,
 } from "../../src/modes/interactive/components/teamwork-sidebar.ts";
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
@@ -40,6 +42,8 @@ describe("teamwork sidebar formatTeamworkSidebarRows", () => {
 			"· worker-b(p/other · off)",
 			"Reviewer",
 			"· a/rev · off",
+			"MCP",
+			"○ 未配置（对话说“接上 originkit”）",
 		]);
 	});
 
@@ -133,6 +137,55 @@ describe("teamwork sidebar formatTeamworkSidebarRows", () => {
 		expect(lines).toContain("· run-1 运行中");
 		expect(lines).toContain("扩展");
 		expect(lines).toContain("· originkit Connected");
+	});
+
+	it("renders ● lamp status lines without the default bullet", () => {
+		const green = "[32m●[0m originkit 4 tools";
+		const lines = formatTeamworkSidebarRows({
+			...base,
+			extensionLines: ["● originkit 4 tools", green, "plain status"],
+		}).map((row) => row.text);
+		expect(lines).toContain("扩展");
+		expect(lines).toContain("● originkit 4 tools");
+		expect(lines).toContain(green);
+		expect(lines).toContain("· plain status");
+		expect(lines).not.toContain("· ● originkit 4 tools");
+	});
+
+	it("always shows the MCP group, even with no servers", () => {
+		const lines = formatTeamworkSidebarRows(base).map((row) => row.text);
+		const mcpIndex = lines.indexOf("MCP");
+		expect(mcpIndex).toBeGreaterThan(-1);
+		expect(lines[mcpIndex + 1]).toContain("○ 未配置");
+	});
+
+	it("shows one lamp row per MCP server", () => {
+		const lines = formatTeamworkSidebarRows({
+			...base,
+			mcpServers: [
+				{ name: "originkit", state: "ok", toolCount: 4 },
+				{ name: "broken", state: "err", toolCount: 0, error: "401" },
+			],
+		}).map((row) => row.text);
+		expect(lines).toContain("MCP");
+		expect(lines.some((line) => line.includes("originkit") && line.includes("4 tools"))).toBe(true);
+		expect(lines.some((line) => line.includes("broken") && line.includes("err"))).toBe(true);
+		expect(lines.some((line) => line.includes("○ 未配置"))).toBe(false);
+	});
+
+	it("shows config errors as an MCP err row", () => {
+		const lines = formatTeamworkSidebarRows({ ...base, mcpError: "bad json" }).map((row) => row.text);
+		expect(lines.some((line) => line.includes("配置读取失败"))).toBe(true);
+	});
+
+	it("formats MCP server rows with a leading lamp", () => {
+		expect(formatMcpServerRow({ name: "o", state: "ok", toolCount: 2 })).toContain("o 2 tools");
+		expect(
+			formatMcpServerRow({ name: "o", state: "err", toolCount: 0 })
+				.replace(/\u001b\[[0-9;]*m/g, "")
+				.startsWith("●"),
+		).toBe(true);
+		expect(formatMcpServerRow({ name: "o", state: "connecting", toolCount: 0 })).toContain("connecting");
 	});
 });
 
@@ -406,5 +459,66 @@ describe("teamwork sidebar brand row", () => {
 			expect(text).not.toContain("...");
 			sidebar.dispose();
 		}
+	});
+});
+
+describe("teamwork sidebar agent mode", () => {
+	it("maps c-code themes to plan/build/yolo", () => {
+		expect(teamworkAgentModeFromTheme("c-code-yellow")).toBe("plan");
+		expect(teamworkAgentModeFromTheme("c-code-green")).toBe("build");
+		expect(teamworkAgentModeFromTheme("c-code-red")).toBe("yolo");
+		expect(teamworkAgentModeFromTheme("dark")).toBeUndefined();
+		expect(teamworkAgentModeFromTheme(undefined)).toBeUndefined();
+	});
+
+	it("renders a dedicated mode row only when the mode is known", () => {
+		const withMode = formatTeamworkSidebarRows({ ...base, agentMode: "yolo" }).map((row) => row.text);
+		expect(withMode).toContain("模式");
+		expect(withMode).toContain("· ● yolo");
+		const withoutMode = formatTeamworkSidebarRows(base).map((row) => row.text);
+		expect(withoutMode).not.toContain("模式");
+	});
+
+	it("highlights working rows with accent so the lamp is visible", () => {
+		const sidebar = new TeamworkSidebarComponent({ requestRender: () => {} } as never, {
+			sessionLine: "s",
+			contextLine: "c",
+			modelLine: "m",
+			roleModels: {
+				leader: { provider: "o", model: "lead" },
+				worker1: { provider: "o", model: "same" },
+				reviewer: { provider: "a", model: "r" },
+			},
+			sessionModel: { provider: "o", id: "s" },
+			spinning: false,
+			statuses: { leader: "working", workers: { worker1: "working" }, reviewer: "pending" },
+		});
+		const text = sidebar.render(60).join("\n");
+		// Active rows carry ANSI styling (accent bold); idle bullets do not.
+		const stripped = text.replace(/\u001b\[[0-9;]*m/g, "");
+		expect(stripped).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] worker1\(/);
+		const spinnerLine = text.split("\n").find((line) => /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(line.replace(/\u001b\[[0-9;]*m/g, "")));
+		expect(spinnerLine).toContain("\u001b");
+		sidebar.dispose();
+	});
+
+	it("marks the fold row active when hidden workers are working", () => {
+		const roleModels: Record<string, { provider: string; model: string }> = {};
+		for (let i = 1; i <= 3; i++) roleModels[`worker${i}`] = { provider: "o", model: "m" };
+		const rows = formatTeamworkSidebarRows(
+			{
+				...base,
+				roleModels,
+				statuses: {
+					leader: "completed",
+					workers: { worker1: "completed", worker2: "completed", worker3: "working" },
+					reviewer: "pending",
+				},
+			},
+			{ maxWorkers: 1 },
+		);
+		const fold = rows.find((row) => row.text.startsWith("…"));
+		expect(fold?.active).toBe(true);
+		expect(fold?.text).toContain("●");
 	});
 });

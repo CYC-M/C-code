@@ -4,6 +4,7 @@ import type { RoleModelRef } from "../../src/core/teamwork/types.ts";
 import {
 	buildRoleBindingSummary,
 	ensureWorkerBindings,
+	formatWorkerPlanPreview,
 	resolveEffectiveLeader,
 	runAddWorkers,
 	runReconfigureRole,
@@ -324,5 +325,51 @@ describe("teamwork pool summary", () => {
 	it("reports an empty pool", () => {
 		expect(formatPoolBindings(undefined)).toContain("no workers");
 		expect(formatPoolBindings({ reviewer: { provider: "a", model: "c" } })).toContain("no workers");
+	});
+});
+
+describe("teamwork worker plan preview", () => {
+	it("formats one block per station with title, goal, and criteria", () => {
+		const text = formatWorkerPlanPreview([
+			{
+				role: "worker1",
+				label: "worker1（UI designer）",
+				title: "Login page",
+				goal: "Build the login form",
+				successCriteria: ["renders", "validates input"],
+			},
+		]);
+		expect(text).toContain("worker1（UI designer）");
+		expect(text).toContain("Login page");
+		expect(text).toContain("Build the login form");
+		expect(text).toContain("renders");
+	});
+
+	it("shows the preview before configuring each station in turn", async () => {
+		const store = makeStore({ reviewer: { provider: "a", model: "rev" } });
+		const seen: string[] = [];
+		const baseDeps = makeDeps(
+			store,
+			[
+				{ provider: "o", id: "one" },
+				{ provider: "o", id: "two" },
+			],
+			[],
+		);
+		const deps: TeamworkWizardDeps = { ...baseDeps, notify: (message: string) => seen.push(message) };
+		await ensureWorkerBindings(
+			deps,
+			["worker1", "worker2"],
+			{ worker1: "UI designer", worker2: "Back-end architect" },
+			[
+				{ role: "worker1", label: "worker1（UI designer）", title: "Login page", goal: "Build it" },
+				{ role: "worker2", label: "worker2（Back-end architect）", title: "API", goal: "Serve it" },
+			],
+		);
+		expect(seen[0]).toContain("分工预览");
+		expect(seen[0]).toContain("worker1（UI designer）");
+		expect(seen[0]).toContain("Login page");
+		expect(store.snapshot().worker1).toEqual({ provider: "o", model: "one" });
+		expect(store.snapshot().worker2).toEqual({ provider: "o", model: "two" });
 	});
 });

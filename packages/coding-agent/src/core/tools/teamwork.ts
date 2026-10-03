@@ -14,9 +14,9 @@ import {
 	workerRolesInTasks,
 } from "../teamwork/naming.ts";
 import { runTeamRound, type WorkerModelClient } from "../teamwork/orchestrator.ts";
-import { assembleTeamConfig } from "../teamwork/roles.ts";
+import { assembleTeamConfig, WORKER_PROMPT } from "../teamwork/roles.ts";
 import { continueRun, createRun } from "../teamwork/state.ts";
-import type { RoleModelRef, TeamRunState, TeamTask, TeamworkEvent } from "../teamwork/types.ts";
+import type { RoleModelRef, TeamRunState, TeamTask, TeamworkEvent, TeamworkWorkerPreview } from "../teamwork/types.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 export interface TeamworkToolOptions {
@@ -27,7 +27,11 @@ export interface TeamworkToolOptions {
 	 * binding yet. The interactive mode supplies this; headless callers leave it unset and
 	 * get an actionable error instead.
 	 */
-	ensureWorkerBindings?: (roles: readonly string[], labels: Record<string, string>) => Promise<void>;
+	ensureWorkerBindings?: (
+		roles: readonly string[],
+		labels: Record<string, string>,
+		previews?: readonly TeamworkWorkerPreview[],
+	) => Promise<void>;
 }
 
 const teamworkSchema = Type.Object({
@@ -67,6 +71,28 @@ function unboundWorkersError(roles: readonly string[], labels: Record<string, st
 	return new Error(
 		`teamwork: no model configured for ${names}. Run /teamwork bind ${roles.join(" ")} to pick a model per worker, then call teamwork again.`,
 	);
+}
+
+/**
+ * Leader 分工预览：每个待配工位取首个任务的标题/目标/验收标准，
+ * 供 UI 先展示分工表再逐个确认模型。
+ */
+function buildWorkerPreviews(tasks: readonly TeamTask[], roles: readonly string[]): TeamworkWorkerPreview[] {
+	const labels = workerDescriptionsInTasks(tasks);
+	const firstByRole = new Map<string, TeamTask>();
+	for (const task of tasks) {
+		if (!firstByRole.has(task.role)) firstByRole.set(task.role, task);
+	}
+	return roles.map((role) => {
+		const task = firstByRole.get(role);
+		return {
+			role,
+			label: formatWorkerLabel(role, labels[role]),
+			...(task?.title === undefined ? {} : { title: task.title }),
+			...(task?.goal === undefined ? {} : { goal: task.goal }),
+			...(task?.successCriteria === undefined ? {} : { successCriteria: task.successCriteria }),
+		};
+	});
 }
 
 function assertValidPriorRun(data: unknown, runId: string): asserts data is TeamRunState {
@@ -179,13 +205,34 @@ export function createTeamworkToolDefinition(
 				// keeps a naming slip from failing the run.
 				const tasks = canonicalizeWorkerTaskRoles(params.tasks, { knownRoles: Object.keys(prior.team.roles) });
 				run = continueRun(prior, tasks);
+				// New workers introduced on retry need model bindings too: backfill from
+				// stored settings first, then ask the user (with 分工预览) for the rest.
+				const backfill = settings?.getRoleModels?.() ?? {};
+				for (const role of workerRolesInTasks(tasks)) {
+					if (run.team.roles[role] === undefined && backfill[role] !== undefined) {
+						run.team.roles[role] = { ...backfill[role], systemPrompt: WORKER_PROMPT };
+					}
+				}
+				const missingRetry = workerRolesInTasks(tasks).filter((role) => run.team.roles[role] === undefined);
+				if (missingRetry.length > 0) {
+					const labels = workerDescriptionsInTasks(tasks);
+					await options?.ensureWorkerBindings?.(missingRetry, labels, buildWorkerPreviews(tasks, missingRetry));
+					const latest = settings?.getRoleModels?.() ?? {};
+					for (const role of missingRetry) {
+						if (run.team.roles[role] === undefined && latest[role] !== undefined) {
+							run.team.roles[role] = { ...latest[role], systemPrompt: WORKER_PROMPT };
+						}
+					}
+					const stillMissing = missingRetry.filter((role) => run.team.roles[role] === undefined);
+					if (stillMissing.length > 0) throw unboundWorkersError(stillMissing, labels);
+				}
 			} else {
 				const roleModels = settings?.getRoleModels();
 				const tasks = canonicalizeWorkerTaskRoles(params.tasks, { knownRoles: Object.keys(roleModels ?? {}) });
 				const missing = unboundWorkerRoles(roleModels, tasks);
 				if (missing.length > 0) {
 					const labels = workerDescriptionsInTasks(tasks);
-					await options?.ensureWorkerBindings?.(missing, labels);
+					await options?.ensureWorkerBindings?.(missing, labels, buildWorkerPreviews(tasks, missing));
 					const stillMissing = unboundWorkerRoles(settings?.getRoleModels(), tasks);
 					if (stillMissing.length > 0) throw unboundWorkersError(stillMissing, labels);
 				}

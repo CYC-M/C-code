@@ -106,6 +106,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { McpManager, type McpSnapshot } from "./mcp-manager.ts";
 import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
@@ -130,6 +131,7 @@ import {
 	type NormalizedBuildSystemPromptOptions,
 	normalizeBuildSystemPromptOptions,
 } from "./system-prompt.ts";
+import type { TeamworkWorkerPreview } from "./teamwork/types.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions, defaultActiveToolNames } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
@@ -382,6 +384,9 @@ export class AgentSession {
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
+	private _mcpManager: McpManager;
+	private _mcpTools: ToolDefinition[] = [];
+	private _mcpChangeHook?: () => void;
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
@@ -389,7 +394,11 @@ export class AgentSession {
 	private _allowedToolNames?: Set<string>;
 	private _excludedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
-	private _teamworkWorkerBindingsHook?: (roles: readonly string[], labels: Record<string, string>) => Promise<void>;
+	private _teamworkWorkerBindingsHook?: (
+		roles: readonly string[],
+		labels: Record<string, string>,
+		previews?: readonly TeamworkWorkerPreview[],
+	) => Promise<void>;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionMode: ExtensionMode = "print";
@@ -445,6 +454,29 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+		this._mcpManager = new McpManager({
+			cwd: this._cwd,
+			isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
+			events: {
+				onToolsChanged: (tools) => {
+					// Skip no-op publishes: every refresh rebuilds the system
+					// prompt object, so a redundant refresh would break object
+					// identity across reads. Execute closures resolve the live
+					// client at call time, so same-name reconnects stay correct.
+					const signature = (defs: ToolDefinition[]): string =>
+						defs.map((tool) => `${tool.name}\0${tool.description}`).join("\0");
+					if (tools.length === this._mcpTools.length && signature(tools) === signature(this._mcpTools)) {
+						return;
+					}
+					this._mcpTools = tools;
+					this._refreshToolRegistry();
+				},
+				onStateChanged: () => this._mcpChangeHook?.(),
+			},
+		});
+		// Non-blocking: placeholder states publish synchronously via the
+		// snapshot; tools merge in as each server finishes connecting.
+		void this._mcpManager.connectAll();
 		if (this._initialActiveToolNames === undefined) this._restoreToolsFromTranscript();
 	}
 
@@ -1186,6 +1218,9 @@ export class AgentSession {
 		);
 		this._disconnectFromAgent();
 		this._eventListeners = [];
+		// Fire-and-forget: dispose is synchronous and must succeed; the
+		// manager swallows per-connection close errors internally.
+		void this._mcpManager.dispose();
 		if (this._cacheWarmer) {
 			this._cacheWarmer.onWarmed = undefined;
 			this._cacheWarmer.cancel();
@@ -1271,6 +1306,24 @@ export class AgentSession {
 
 	getToolDefinition(name: string): ToolDefinition | undefined {
 		return this._toolDefinitions.get(name)?.definition;
+	}
+
+	/** Current MCP server states for the sidebar (always present, possibly empty). */
+	getMcpSnapshot(): McpSnapshot {
+		return this._mcpManager.getSnapshot();
+	}
+
+	/**
+	 * Install a hook called on every MCP state transition. The UI installs it
+	 * after the session starts (mirrors the teamwork bindings hook).
+	 */
+	setMcpChangeHook(hook?: () => void): void {
+		this._mcpChangeHook = hook;
+	}
+
+	/** Re-read mcp.json and reconnect (all servers, or one by name). */
+	async reconnectMcp(name?: string): Promise<void> {
+		await this._mcpManager.reconnect(name);
 	}
 
 	/**
@@ -2259,7 +2312,13 @@ export class AgentSession {
 	 * instead of the run failing with an unbound role.
 	 */
 	setTeamworkWorkerBindingsHook(
-		hook: ((roles: readonly string[], labels: Record<string, string>) => Promise<void>) | undefined,
+		hook:
+			| ((
+					roles: readonly string[],
+					labels: Record<string, string>,
+					previews?: readonly TeamworkWorkerPreview[],
+			  ) => Promise<void>)
+			| undefined,
 	): void {
 		this._teamworkWorkerBindingsHook = hook;
 	}
@@ -3221,6 +3280,10 @@ export class AgentSession {
 				definition,
 				sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
 			})),
+			...this._mcpTools.map((definition) => ({
+				definition,
+				sourceInfo: createSyntheticSourceInfo(`<mcp:${definition.name}>`, { source: "mcp" }),
+			})),
 		].filter((tool) => isAllowedTool(tool.definition.name));
 		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
 			Array.from(this._baseToolDefinitions.entries())
@@ -3321,8 +3384,8 @@ export class AgentSession {
 						sessionManager: this.sessionManager,
 						settingsManager: this.settingsManager,
 						// Reads the hook at call time: the UI installs it after the session starts.
-						ensureWorkerBindings: async (roles, labels) => {
-							await this._teamworkWorkerBindingsHook?.(roles, labels);
+						ensureWorkerBindings: async (roles, labels, previews) => {
+							await this._teamworkWorkerBindingsHook?.(roles, labels, previews);
 						},
 					},
 				});
@@ -3374,6 +3437,7 @@ export class AgentSession {
 			flagValues: previousFlagValues,
 			includeAllExtensionTools: true,
 		});
+		void this._mcpManager.reconnect();
 
 		const hasBindings =
 			this._extensionUIContext ||

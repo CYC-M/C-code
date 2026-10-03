@@ -10,6 +10,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { VERSION } from "../../../config.ts";
+import type { McpServerStatus } from "../../../core/mcp-manager.ts";
 import { compareWorkerRoleIds, formatWorkerLabel } from "../../../core/teamwork/naming.ts";
 import type { TeamworkPanelState } from "../../../core/teamwork/panel.ts";
 import type { RoleModelRef, TeamMemberStatus } from "../../../core/teamwork/types.ts";
@@ -26,6 +27,13 @@ export interface TeamworkSidebarData {
 	sessionModel: { provider: string; id: string; thinkingLevel?: ThinkingLevel };
 	runLine?: string;
 	extensionLines?: string[];
+	/**
+	 * Core MCP servers. Always rendered as a permanent "MCP" group, even when
+	 * empty (placeholder row). Undefined is treated as no servers.
+	 */
+	mcpServers?: McpServerStatus[];
+	/** Config-level MCP failure (unreadable mcp.json). Rendered as an err row. */
+	mcpError?: string;
 	/** Work descriptions by worker role id, as named by the leader (`worker1` → `UI designer`). */
 	workerDescriptions?: Record<string, string>;
 	/**
@@ -38,6 +46,13 @@ export interface TeamworkSidebarData {
 	spinning: boolean;
 	/** Live per-member statuses from the run panel. Absent while idle. */
 	statuses?: TeamworkMemberStatuses;
+	/**
+	 * Agent mode driving the sidebar accent (plan/build/yolo from the c-code
+	 * extension themes). When present a dedicated `模式` row is rendered so the
+	 * sidebar text stays in sync with the footer even if extension lines are
+	 * sliced away. Absent for callers that do not track a mode.
+	 */
+	agentMode?: "plan" | "build" | "yolo";
 }
 
 /** Worker rows shown when the available height is unknown. */
@@ -101,18 +116,55 @@ export interface TeamworkSidebarRow {
 	title?: boolean;
 	dim?: boolean;
 	/**
-	 * Secondary content that may be shed when the height budget is tight, lowest priority
-	 * first: extension statuses, then the run line. The roster always wins.
+	 * Agent mode for the dedicated `模式` value row. Renders in the mode color
+	 * (plan黄/build绿/yolo红) so the text matches the sidebar accent.
 	 */
-	key?: "extensions" | "run";
+	mode?: "plan" | "build" | "yolo";
+	/**
+	 * Secondary content that may be shed when the height budget is tight:
+	 * extension statuses first, then the remaining keyed rows (run, MCP).
+	 * The roster always wins.
+	 */
+	key?: "extensions" | "run" | "mcp";
 }
 
 /** Placeholder row shown when no worker is configured yet. */
 const EMPTY_WORKERS_ROW = "· 暂无（/teamwork bind …）";
 
+/** ANSI escape matcher for extension status text (themed lamps carry color codes). */
+const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
+
+/**
+ * Extension status lines starting with a `●` lamp render without the default
+ * `· ` bullet, so the lamp sits at the left edge of the row (MCP server
+ * health: green = healthy, red = problem).
+ */
+export function isLampStatusLine(text: string): boolean {
+	return text.replace(ANSI_PATTERN, "").startsWith("●");
+}
+
 /** Fold indicator for workers hidden by the height budget. */
-function workerFoldRow(hidden: number): TeamworkSidebarRow {
+function workerFoldRow(hidden: number, hiddenActive = false): TeamworkSidebarRow {
+	if (hiddenActive) return { text: `…${hidden} more ●`, active: true, dim: false };
 	return { text: `…${hidden} more`, active: false, dim: true };
+}
+
+/** Mode value color token: plan黄 / build绿 / yolo红，与 c-code 主题 accent 保持一致。 */
+function modeColorToken(mode: "plan" | "build" | "yolo"): "warning" | "accent" | "error" {
+	if (mode === "plan") return "warning";
+	if (mode === "yolo") return "error";
+	return "accent";
+}
+
+/**
+ * c-code 三模式主题到 sidebar 模式行的映射：c-code-yellow→plan，
+ * c-code-green→build，c-code-red→yolo。未知主题返回 undefined（不渲染模式行）。
+ */
+export function teamworkAgentModeFromTheme(themeName: string | undefined): "plan" | "build" | "yolo" | undefined {
+	if (themeName === "c-code-yellow") return "plan";
+	if (themeName === "c-code-green") return "build";
+	if (themeName === "c-code-red") return "yolo";
+	return undefined;
 }
 
 export interface TeamworkSidebarSections {
@@ -130,6 +182,23 @@ export function sidebarWorkerRoles(data: TeamworkSidebarData): string[] {
 	const live = Object.keys(data.statuses?.workers ?? {});
 	const roles = new Set([...configured, ...live]);
 	return [...roles].sort(compareWorkerRoleIds);
+}
+
+/**
+ * One sidebar row per core MCP server. The `●` lamp leads the row (green =
+ * healthy, red = problem, dim = transitional) so it sits at the left edge.
+ */
+export function formatMcpServerRow(server: McpServerStatus): string {
+	switch (server.state) {
+		case "ok":
+			return `${theme.fg("success", "●")} ${server.name} ${server.toolCount} tools`;
+		case "err":
+			return `${theme.fg("error", "●")} ${server.name} err`;
+		case "connecting":
+			return `${theme.fg("dim", "●")} ${server.name} connecting`;
+		case "off":
+			return `${theme.fg("dim", "●")} ${server.name} off`;
+	}
 }
 
 /**
@@ -154,6 +223,12 @@ export function formatTeamworkSidebarSections(data: TeamworkSidebarData): Teamwo
 		{ text: `· ${data.contextLine}`, active: false },
 		{ text: "模型", active: false, title: true },
 		{ text: `· ${data.modelLine}`, active: false },
+		...(data.agentMode === undefined
+			? []
+			: [
+					{ text: "模式", active: false, title: true },
+					{ text: `· ● ${data.agentMode}`, active: false, mode: data.agentMode },
+				]),
 		{ text: "Leader", active: false, title: true },
 		{ text: `· ${formatSidebarBinding(leader)}`, active: isActive("leader"), role: "leader" },
 		{ text: "Workers", active: false, title: true },
@@ -179,6 +254,17 @@ export function formatTeamworkSidebarSections(data: TeamworkSidebarData): Teamwo
 			dim: reviewer === undefined,
 		},
 	];
+	after.push({ text: "MCP", active: false, title: true, key: "mcp" });
+	if (data.mcpError !== undefined) {
+		after.push({ text: `${theme.fg("error", "●")} 配置读取失败`, active: false, key: "mcp" });
+	}
+	const mcpServers = data.mcpServers ?? [];
+	if (mcpServers.length === 0 && data.mcpError === undefined) {
+		after.push({ text: "○ 未配置（对话说“接上 originkit”）", active: false, dim: true, key: "mcp" });
+	}
+	for (const server of mcpServers) {
+		after.push({ text: formatMcpServerRow(server), active: false, key: "mcp" });
+	}
 	// The run row only exists while a run is active: an idle placeholder here
 	// reads as a Reviewer item. It gets its own section so it is never
 	// misattributed, and it is the first row shed when height runs out.
@@ -188,7 +274,9 @@ export function formatTeamworkSidebarSections(data: TeamworkSidebarData): Teamwo
 	}
 	if (data.extensionLines && data.extensionLines.length > 0) {
 		after.push({ text: "扩展", active: false, title: true, key: "extensions" });
-		for (const text of data.extensionLines) after.push({ text: `· ${text}`, active: false, key: "extensions" });
+		for (const text of data.extensionLines) {
+			after.push({ text: isLampStatusLine(text) ? text : `· ${text}`, active: false, key: "extensions" });
+		}
 	}
 	return { before, workers: workerRows, after };
 }
@@ -204,7 +292,10 @@ export function formatTeamworkSidebarRows(
 		rows.push({ text: EMPTY_WORKERS_ROW, active: false, dim: true });
 	} else {
 		rows.push(...sections.workers.slice(0, maxWorkers));
-		if (sections.workers.length > maxWorkers) rows.push(workerFoldRow(sections.workers.length - maxWorkers));
+		if (sections.workers.length > maxWorkers) {
+			const hiddenActive = sections.workers.slice(maxWorkers).some((row) => row.active);
+			rows.push(workerFoldRow(sections.workers.length - maxWorkers, hiddenActive));
+		}
 	}
 	rows.push(...sections.after);
 	return rows;
@@ -286,8 +377,21 @@ export class TeamworkSidebarComponent extends VStack {
 	/** Wrap one row to the column, keeping the frame gutter on every physical line. */
 	private wrapRow(row: TeamworkSidebarRow, width: number): string[] {
 		let text = row.text;
-		if (row.active) text = text.replace(/^· /, `${SPIN_FRAMES[this.spinFrame % SPIN_FRAMES.length]} `);
-		const styled = row.title ? theme.fg("accent", text) : row.dim ? theme.fg("dim", text) : text;
+		if (row.active) {
+			const folded = text.startsWith("…");
+			text = folded
+				? text.replace(/●?$/, `${SPIN_FRAMES[this.spinFrame % SPIN_FRAMES.length]}`)
+				: text.replace(/^· /, `${SPIN_FRAMES[this.spinFrame % SPIN_FRAMES.length]} `);
+		}
+		const styled = row.active
+			? theme.bold(theme.fg("accent", text))
+			: row.mode !== undefined
+				? theme.fg(modeColorToken(row.mode), text)
+				: row.title
+					? theme.fg("accent", text)
+					: row.dim
+						? theme.fg("dim", text)
+						: text;
 		const clickable = row.role !== undefined && this.onSelectRole !== undefined;
 		const inner = Math.max(MIN_INNER_WIDTH, width - GUTTER.length - (clickable ? 2 : 0));
 		const wrapped = wrapTextWithAnsi(styled, inner);
@@ -325,7 +429,12 @@ export class TeamworkSidebarComponent extends VStack {
 	}
 
 	private syncSpinTimer(): void {
-		const anyActive = this.getSpinningRoles().length > 0;
+		const statuses = this.currentData?.statuses;
+		const anyActive =
+			statuses !== undefined &&
+			(statuses.leader === "working" ||
+				statuses.reviewer === "reviewing" ||
+				Object.values(statuses.workers).some((status) => status === "working"));
 		if (!anyActive) {
 			this.stopSpinTimer();
 			this.spinFrame = 0;
@@ -396,7 +505,10 @@ export class TeamworkSidebarComponent extends VStack {
 				rows.push({ text: EMPTY_WORKERS_ROW, active: false, dim: true });
 			} else {
 				rows.push(...sections.workers.slice(0, limit));
-				if (sections.workers.length > limit) rows.push(workerFoldRow(sections.workers.length - limit));
+				if (sections.workers.length > limit) {
+					const hiddenActive = sections.workers.slice(limit).some((row) => row.active);
+					rows.push(workerFoldRow(sections.workers.length - limit, hiddenActive));
+				}
 			}
 			rows.push(...after);
 			return rows;

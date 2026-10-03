@@ -6,7 +6,7 @@ import {
 	formatWorkerRoleId,
 	parseWorkerRoleId,
 } from "../../core/teamwork/naming.ts";
-import type { RoleModelRef } from "../../core/teamwork/types.ts";
+import type { RoleModelRef, TeamworkWorkerPreview } from "../../core/teamwork/types.ts";
 import type { ModelSelectorComponent } from "./components/model-selector.ts";
 
 export function buildRoleBindingSummary(roleModels: Record<string, RoleModelRef> | undefined): string {
@@ -145,18 +145,52 @@ export async function runTeamworkInitialSetup(
 }
 
 /**
+ * Leader 分工预览表：先展示每个待配工位的任务摘要，用户再逐个确认模型。
+ * 返回空串表示无可预览内容，调用方直接进入逐个配置。
+ */
+export function formatWorkerPlanPreview(previews: readonly TeamworkWorkerPreview[]): string {
+	const lines: string[] = [];
+	for (const preview of previews) {
+		const title = preview.title?.trim() || "—";
+		const goal = preview.goal?.trim() || "—";
+		lines.push(`- ${preview.label}: ${title}`);
+		lines.push(`  目标: ${goal}`);
+		const criteria = (preview.successCriteria ?? []).map((c) => c.trim()).filter((c) => c.length > 0);
+		if (criteria.length > 0) lines.push(`  验收: ${criteria.slice(0, 3).join("；")}`);
+	}
+	return lines.join("\n");
+}
+
+/**
  * Bind a model for each worker the leader proposed. Called by the teamwork tool while it
  * runs, so an unbound `workerN` becomes a one-question prompt instead of a failed run.
+ *
+ * When `previews` are provided the leader's split is shown first (分工预览), then each
+ * station is configured in turn with keep/reselect. Cancelling one station leaves it
+ * unbound and the tool halts with an actionable error instead of silently continuing.
  */
 export async function ensureWorkerBindings(
 	deps: TeamworkWizardDeps,
 	roles: readonly string[],
 	labels: Record<string, string> = {},
+	previews: readonly TeamworkWorkerPreview[] = [],
 ): Promise<void> {
 	const seen = new Set<string>();
+	const ordered: string[] = [];
 	for (const role of roles) {
 		if (role === "leader" || role === "reviewer" || seen.has(role)) continue;
 		seen.add(role);
+		ordered.push(role);
+	}
+	if (ordered.length === 0) return;
+	const byRole = new Map(previews.map((preview) => [preview.role, preview]));
+	const previewRows = ordered
+		.map((role) => byRole.get(role))
+		.filter((preview): preview is TeamworkWorkerPreview => preview !== undefined);
+	if (previewRows.length > 0) {
+		deps.notify(`Leader 分工预览:\n${formatWorkerPlanPreview(previewRows)}`);
+	}
+	for (const role of ordered) {
 		await configureRole(deps, role, { removable: false, label: formatWorkerLabel(role, labels[role]) });
 	}
 }

@@ -93,6 +93,7 @@ import type {
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
+import { loadMcpConfigFile, type McpFileConfig, type McpServerConfig } from "../../core/mcp-manager.ts";
 import { createCompactionSummaryMessage, createCustomMessage } from "../../core/messages.ts";
 import {
 	defaultModelPerProvider,
@@ -165,8 +166,10 @@ import {
 } from "./components/status-indicator.ts";
 import { TeamworkPanelComponent } from "./components/teamwork-panel.ts";
 import {
+	formatMcpServerRow,
 	TeamworkSidebarComponent,
 	type TeamworkSidebarData,
+	teamworkAgentModeFromTheme,
 	toTeamworkMemberStatuses,
 } from "./components/teamwork-sidebar.ts";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.ts";
@@ -193,6 +196,7 @@ import {
 import {
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
+	getCurrentThemeName,
 	getEditorTheme,
 	getMarkdownTheme,
 	getThemeByName,
@@ -527,6 +531,8 @@ export class InteractiveMode {
 	// Persistent teamwork mode: entered via /teamwork, exited via double-Esc or /teamwork exit.
 	private teamworkMode = false;
 	private teamworkLastEscapeTime = 0;
+	// Footer keys currently mirroring core MCP lamps (regular-mode visibility).
+	private lastMcpFooterKeys: string[] = [];
 	private teamworkPreviousModel: { provider: string; id: string } | undefined = undefined;
 	private teamworkPreviousThinking: ThinkingLevel | undefined = undefined;
 	private teamworkPreviousTuiMode: TuiMode | undefined = undefined;
@@ -1094,6 +1100,9 @@ export class InteractiveMode {
 		onThemeChange(() => {
 			this.ui.invalidate();
 			this.updateEditorBorderColor();
+			// Sidebar caches themed ANSI at rebuild time; without an explicit
+			// refresh it would keep the previous mode color (plan黄/build绿/yolo红).
+			if (this.teamworkMode) this.layoutTeamworkSide();
 			this.ui.requestRender();
 		});
 
@@ -2024,6 +2033,8 @@ export class InteractiveMode {
 		this.setupExtensionShortcuts(extensionRunner);
 		this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
 		this.showStartupNoticesIfNeeded();
+		// Session is bound: mirror core MCP state into footer/sidebar from here on.
+		this.installMcpChangeHook();
 	}
 
 	private applyFullscreenScrollbarSetting(): void {
@@ -2245,6 +2256,9 @@ export class InteractiveMode {
 	 */
 	private setExtensionStatus(key: string, text: string | undefined): void {
 		this.footerDataProvider.setExtensionStatus(key, text);
+		// c-code 模式切换经 setStatus 进入 extensionStatuses；teamwork 侧边栏的
+		// 扩展区与模式行都读自这里，切模式后立即重建才不会与 footer 不同步。
+		if (this.teamworkMode) this.layoutTeamworkSide();
 		this.ui.requestRender();
 	}
 
@@ -3257,6 +3271,12 @@ export class InteractiveMode {
 				const customInstructions = text.startsWith("/compact ") ? text.slice(9).trim() : undefined;
 				this.editor.setText("");
 				await this.handleCompactCommand(customInstructions);
+				return;
+			}
+			if (text === "/mcp" || text.startsWith("/mcp ")) {
+				const mcpArgs = text === "/mcp" ? "" : text.slice(5).trim();
+				this.editor.setText("");
+				await this.handleMcpCommand(mcpArgs);
 				return;
 			}
 			if (text === "/reload") {
@@ -5254,13 +5274,21 @@ export class InteractiveMode {
 		const model = this.session.model;
 		const thinking = model?.reasoning === true ? ` · ${this.session.thinkingLevel || "off"}` : "";
 		const modelLine = model ? `(${model.provider}) ${model.id}${thinking}` : "no-model";
-		const extensionLines = [...this.footerDataProvider.getExtensionStatuses().values()].slice(0, 4);
+		// Core MCP lamps render in the dedicated MCP sidebar group; keep them
+		// out of the generic extension lines to avoid duplicates.
+		const extensionLines = [...this.footerDataProvider.getExtensionStatuses().entries()]
+			.filter(([key]) => !key.startsWith("mcp:"))
+			.map(([, text]) => text)
+			.slice(0, 4);
 		const snapshot = this.teamworkPanel?.getSnapshot();
 		const workerDescriptions = this.teamworkWorkerDescriptions();
+		const mcpSnapshot = this.session.getMcpSnapshot();
+		const agentMode = teamworkAgentModeFromTheme(getCurrentThemeName());
 		return {
 			sessionLine,
 			contextLine,
 			modelLine,
+			...(agentMode === undefined ? {} : { agentMode }),
 			roleModels: this.settingsManager.getRoleModels(),
 			sessionModel: {
 				provider: this.session.model?.provider ?? "?",
@@ -5269,6 +5297,8 @@ export class InteractiveMode {
 			},
 			...(runId === undefined ? {} : { runLine: `· ${runId} 运行中` }),
 			...(extensionLines.length === 0 ? {} : { extensionLines }),
+			mcpServers: mcpSnapshot.servers,
+			...(mcpSnapshot.error === undefined ? {} : { mcpError: mcpSnapshot.error }),
 			...(Object.keys(workerDescriptions).length === 0 ? {} : { workerDescriptions }),
 			...(snapshot === undefined ? {} : { statuses: toTeamworkMemberStatuses(snapshot) }),
 			// The sidebar spans the fullscreen height; keep a row for the terminal prompt.
@@ -5426,10 +5456,34 @@ export class InteractiveMode {
 	 * the user for a model per unbound worker instead of failing with an unknown role.
 	 */
 	private installTeamworkWorkerBindingsHook(): void {
-		this.session.setTeamworkWorkerBindingsHook(async (roles, labels) => {
-			await ensureWorkerBindings(this.buildTeamworkWizardDeps(), roles, labels);
+		this.session.setTeamworkWorkerBindingsHook(async (roles, labels, previews) => {
+			await ensureWorkerBindings(this.buildTeamworkWizardDeps(), roles, labels, previews);
 			if (this.teamworkMode) this.layoutTeamworkSide();
 		});
+	}
+
+	/**
+	 * Mirror core MCP lamps into the footer (regular-mode visibility) and
+	 * refresh the teamwork sidebar section. Installed on every session bind.
+	 */
+	private installMcpChangeHook(): void {
+		this.session.setMcpChangeHook(() => {
+			this.syncMcpFooter();
+			if (this.teamworkMode) this.layoutTeamworkSide();
+			this.ui.requestRender();
+		});
+		this.syncMcpFooter();
+	}
+
+	private syncMcpFooter(): void {
+		for (const key of this.lastMcpFooterKeys) {
+			this.footerDataProvider.setExtensionStatus(key, undefined);
+		}
+		const servers = this.session.getMcpSnapshot().servers;
+		this.lastMcpFooterKeys = servers.map((server) => `mcp:${server.name}`);
+		for (const server of servers) {
+			this.footerDataProvider.setExtensionStatus(`mcp:${server.name}`, formatMcpServerRow(server));
+		}
 	}
 
 	private async exitTeamworkMode(): Promise<void> {
@@ -7317,6 +7371,118 @@ export class InteractiveMode {
 		} catch {
 			// Ignore, will be emitted as an event
 		}
+	}
+
+	/**
+	 * Core MCP servers: status, reconnect, and guided add.
+	 * Keys always stay in `{env:VAR}` form; export them in the shell.
+	 */
+	private async handleMcpCommand(args: string): Promise<void> {
+		const parts = args.split(/\s+/).filter((part) => part.length > 0);
+		const sub = parts[0] ?? "status";
+		if (sub === "status") {
+			const snapshot = this.session.getMcpSnapshot();
+			if (snapshot.error !== undefined && snapshot.servers.length === 0) {
+				this.showError(`MCP 配置读取失败: ${snapshot.error}`);
+				return;
+			}
+			if (snapshot.servers.length === 0) {
+				this.showStatus("MCP 未配置。对话说“接上 originkit”，或 /mcp add <name> <url>。");
+				return;
+			}
+			this.showStatus(
+				`MCP ${snapshot.servers
+					.map((server) =>
+						server.state === "ok"
+							? `${server.name}: ok (${server.toolCount} tools)`
+							: `${server.name}: ${server.state}${server.error ? ` (${server.error})` : ""}`,
+					)
+					.join("; ")}`,
+			);
+			return;
+		}
+		if (sub === "reconnect") {
+			const target = parts[1];
+			try {
+				await this.session.reconnectMcp(target);
+				this.showStatus(target ? `MCP ${target} 重连已触发` : "MCP 重连已触发");
+			} catch (error) {
+				this.showError(`MCP 重连失败: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			return;
+		}
+		if (sub === "add") {
+			this.handleMcpAddCommand(parts.slice(1));
+			return;
+		}
+		this.showError("用法：/mcp [status|reconnect [server]|add <name> <url> [--no-auth] [--project]]");
+	}
+
+	private handleMcpAddCommand(rest: string[]): void {
+		const flags = new Set(rest.filter((part) => part.startsWith("--")));
+		const positional = rest.filter((part) => !part.startsWith("--"));
+		const [name, url] = positional;
+		if (!name || !url || positional.length > 2) {
+			this.showError(
+				"用法：/mcp add <name> <url> [--no-auth] [--project]（例如 /mcp add originkit https://mcp.originkit.dev/mcp）",
+			);
+			return;
+		}
+		if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+			this.showError(`MCP 名称只允许字母数字、下划线、中划线: ${name}`);
+			return;
+		}
+		let protocol: string;
+		try {
+			protocol = new URL(url).protocol;
+		} catch {
+			this.showError(`MCP 地址不合法: ${url}`);
+			return;
+		}
+		if (protocol !== "https:" && protocol !== "http:") {
+			this.showError(`MCP 地址只支持 http(s): ${url}`);
+			return;
+		}
+		const project = flags.has("--project");
+		if (project && !this.settingsManager.isProjectTrusted()) {
+			this.showError("项目未信任，项目级 MCP 配置被忽略。先 /trust 再添加，或去掉 --project 写入用户级。");
+			return;
+		}
+		const filePath = project
+			? path.join(this.sessionManager.getCwd(), CONFIG_DIR_NAME, "mcp.json")
+			: path.join(getAgentDir(), "extensions", "mcp.json");
+		let fileConfig: McpFileConfig = {};
+		if (fs.existsSync(filePath)) {
+			try {
+				fileConfig = loadMcpConfigFile(filePath);
+			} catch (error) {
+				this.showError(`MCP 配置解析失败 ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+				return;
+			}
+		}
+		if (fileConfig.servers?.[name]) {
+			this.showError(`MCP ${name} 已存在，改完文件后 /mcp reconnect ${name}`);
+			return;
+		}
+		const envVar = `${name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_API_KEY`;
+		const servers: Record<string, McpServerConfig> = { ...(fileConfig.servers ?? {}) };
+		servers[name] = flags.has("--no-auth")
+			? { type: "remote", url }
+			: { type: "remote", url, headers: { Authorization: `Bearer {env:${envVar}}` } };
+		try {
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, `${JSON.stringify({ servers }, null, 2)}\n`);
+		} catch (error) {
+			this.showError(`MCP 配置写入失败 ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+		void this.session.reconnectMcp(name);
+		const scope = project ? "项目" : "用户";
+		this.showStatus(
+			flags.has("--no-auth")
+				? `MCP ${name} 已写入${scope}级配置，正在连接`
+				: `MCP ${name} 已写入${scope}级配置。先在 shell 里 export ${envVar}=...，正在连接（缺 key 会红灯）。`,
+		);
 	}
 
 	stop(fullscreenExitOutput = this.settingsManager.getFullscreenExitOutput()): void {

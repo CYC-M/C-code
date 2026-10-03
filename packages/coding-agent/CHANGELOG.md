@@ -4,8 +4,10 @@
 
 ### Added
 
+- Added native MCP support: remote MCP servers (Originkit first) connect from core, register `mcp_<server>_<tool>` tools, and show a permanent "MCP" sidebar group with per-server health lamps (mirrored into the footer). Configure via `/mcp add <name> <url>`, inspect with `/mcp status`, reconnect with `/mcp reconnect`; secrets stay in `{env:VAR}` form.
 - Added `/teamwork`: multi-model team delegation with a brain → workers → reviewer loop, role↔model bindings in settings, and hard round/call budgets.
 - Added per-worker model prompts: workers the leader names without a binding are bound while the run is prepared, one model selector per worker.
+- Added teamwork split preview: unbound workers now show the leader's task split (title, goal, acceptance criteria) before asking for one model per station, including workers introduced on `continueRunId` retries.
 
 ### Changed
 
@@ -15,6 +17,8 @@
 ### Fixed
 
 - Fixed `/teamwork` runs failing with `unknown role` when the leader named a worker that had no model binding.
+- Fixed the teamwork sidebar keeping the previous plan/build/yolo color and model text after a mode switch: it now rebuilds on theme and extension-status changes and renders a dedicated mode row.
+- Fixed leader/worker/reviewer working indicators being invisible: active rows now render the spinning frame in accent bold, and the fold row lights up when hidden workers are working.
 
 ## [0.87.1] - 2026-09-22
 

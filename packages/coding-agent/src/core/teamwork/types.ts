@@ -110,6 +110,18 @@ export interface TeamRoster {
 	reviewer: { provider: string; model: string };
 }
 
+/**
+ * Leader 分工预览：用户按工位逐个确认模型前先看到的任务摘要。
+ * core 侧组装，interactive 侧渲染，避免 core 依赖 TUI 层。
+ */
+export interface TeamworkWorkerPreview {
+	role: string;
+	label: string;
+	title?: string;
+	goal?: string;
+	successCriteria?: string[];
+}
+
 export type TeamworkEvent =
 	| { type: "teamwork.started"; runId: string; goal: string; team: TeamRoster }
 	| {

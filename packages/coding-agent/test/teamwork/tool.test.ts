@@ -433,4 +433,119 @@ describe("teamwork tool worker naming", () => {
 			),
 		).rejects.toThrow(/no model configured for worker1.*\/teamwork bind worker1/s);
 	});
+
+	it("passes分工 previews when asking for missing models", async () => {
+		const settings = makeMutableSettings({ reviewer: { provider: "o", model: "rev" } });
+		const asked: { roles: readonly string[]; labels: Record<string, string>; previews?: unknown }[] = [];
+		const tool = createTeamworkToolDefinition("/work", {
+			sessionManager: { appendCustomEntry: () => "e1" } as unknown as SessionManager,
+			settingsManager: settings.settings,
+			ensureWorkerBindings: async (roles, labels, previews) => {
+				asked.push({ roles, labels, previews });
+				for (const role of roles) settings.settings.setRoleModel(role, { provider: "o", model: "picked" });
+			},
+		});
+
+		await tool.execute(
+			"call-1",
+			{
+				goal: "build",
+				tasks: [
+					{
+						id: "t1",
+						title: "Login page",
+						goal: "Build the login form",
+						role: "worker1（UI designer）",
+						successCriteria: ["renders"],
+					},
+				],
+			},
+			undefined,
+			undefined,
+			makeCtx(),
+		);
+
+		expect(asked).toHaveLength(1);
+		expect(asked[0].previews).toEqual([
+			{
+				role: "worker1",
+				label: "worker1（UI designer）",
+				title: "Login page",
+				goal: "Build the login form",
+				successCriteria: ["renders"],
+			},
+		]);
+	});
+
+	it("binds new workers introduced on continueRun instead of failing", async () => {
+		const appended: unknown[] = [];
+		const prior = {
+			runId: "team-1",
+			goal: "fix",
+			phase: "dispatched",
+			team: {
+				roles: {
+					worker1: { provider: "o", model: "m", systemPrompt: "W" },
+					reviewer: { provider: "o", model: "m", systemPrompt: "R" },
+				},
+				reviewer: "reviewer",
+				budget: { maxRounds: 3, maxWorkerCalls: 12 },
+				executor: "serial",
+			},
+			tasks: [{ id: "t1", title: "t", goal: "g", role: "worker1", successCriteria: ["c"] }],
+			results: {},
+			reviews: [],
+			budget: { maxRounds: 3, maxWorkerCalls: 12, roundsUsed: 1, workerCallsUsed: 2 },
+			decisionLog: [],
+		};
+		const settings = makeMutableSettings({ reviewer: { provider: "o", model: "rev" } });
+		const asked: { roles: readonly string[]; labels: Record<string, string>; previews?: unknown }[] = [];
+		const tool = createTeamworkToolDefinition("/work", {
+			sessionManager: {
+				appendCustomEntry: (_t: string, d: unknown) => {
+					appended.push(d);
+					return "e2";
+				},
+			} as unknown as SessionManager,
+			settingsManager: settings.settings,
+			ensureWorkerBindings: async (roles, labels, previews) => {
+				asked.push({ roles, labels, previews });
+				for (const role of roles) settings.settings.setRoleModel(role, { provider: "o", model: "picked" });
+			},
+		});
+		const result = await tool.execute(
+			"call-2",
+			{
+				goal: "fix",
+				tasks: [
+					{ id: "t1", title: "t", goal: "g", role: "worker1", successCriteria: ["c"] },
+					{
+						id: "t2",
+						title: "new UI",
+						goal: "build new UI",
+						role: "worker2（UI designer）",
+						successCriteria: ["renders"],
+					},
+				],
+				continueRunId: "team-1",
+			},
+			undefined,
+			undefined,
+			makeCtx([{ type: "custom", customType: "teamwork-run", data: prior }]),
+		);
+		expect(asked).toHaveLength(1);
+		expect(asked[0].roles).toEqual(["worker2"]);
+		expect(asked[0].previews).toEqual([
+			{
+				role: "worker2",
+				label: "worker2（UI designer）",
+				title: "new UI",
+				goal: "build new UI",
+				successCriteria: ["renders"],
+			},
+		]);
+		const persisted = appended[0] as { team: { roles: Record<string, unknown> } };
+		expect(persisted.team.roles.worker2).toMatchObject({ provider: "o", model: "picked" });
+		expect(JSON.stringify(result.content)).toContain("did it");
+	});
 });

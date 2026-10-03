@@ -54,6 +54,7 @@
 		"@earendil-works/pi-agent-core": "^0.1.0-beta",
 		"@earendil-works/pi-ai": "^0.1.0-beta",
 		"@earendil-works/pi-tui": "^0.1.0-beta",
+		"@modelcontextprotocol/sdk": "1.32.0",
 		"@silvia-odwyer/photon-node": "0.3.4",
 		"chalk": "6.0.0",
 		"cross-spawn": "7.0.6",
