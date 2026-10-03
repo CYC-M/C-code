@@ -64,8 +64,8 @@ export default function cCodeExtension(pi: ExtensionAPI) {
 			pi.setActiveTools(toolsForMode(mode, toolsBeforePlan ?? pi.getActiveTools()));
 			toolsBeforePlan = undefined;
 		}
-		ui.setStatus(MODE_STATUS_KEY, paintStatus(ui.theme, mode));
 		const switched = ui.setTheme(themeForMode(mode));
+		ui.setStatus(MODE_STATUS_KEY, paintStatus(ui.theme, mode));
 		if (!switched.success) {
 			ui.notify(`主题 ${themeForMode(mode)} 切换失败：${switched.error ?? "未知错误"}`, "warning");
 		}

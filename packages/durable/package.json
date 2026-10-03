@@ -1,6 +1,6 @@
 {
 	"name": "@earendil-works/pi-durable",
-	"version": "0.0.1-beta",
+	"version": "0.1.0-beta",
 	"description": "Durable conversation, task, and document runtime for Pi",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -59,8 +59,8 @@
 		"node": ">=22.19.0"
 	},
 	"dependencies": {
-		"@earendil-works/chord": "^0.0.1-beta",
-		"@earendil-works/pi-ai": "^0.0.1-beta"
+		"@earendil-works/chord": "^0.1.0-beta",
+		"@earendil-works/pi-ai": "^0.1.0-beta"
 	},
 	"devDependencies": {
 		"shx": "0.4.0",

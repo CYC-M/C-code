@@ -1,10 +1,10 @@
 {
 	"name": "@earendil-works/pi-coding-agent-install",
-	"version": "0.0.1-beta",
+	"version": "0.1.0-beta",
 	"private": true,
 	"description": "Lockfile root used by the Pi installer and updater.",
 	"dependencies": {
-		"@earendil-works/pi-coding-agent": "0.0.1-beta"
+		"@earendil-works/pi-coding-agent": "0.1.0-beta"
 	},
 	"overrides": {
 		"protobufjs": "7.6.6"

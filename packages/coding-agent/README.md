@@ -1,4 +1,4 @@
-# C-code (v0.0.1-beta)
+# C-code (v0.1.0-beta)
 
 C-code is a minimal, extensible AI agent for the terminal. Adapt C-code to your workflow, not the other way around.
 

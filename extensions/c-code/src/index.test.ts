@@ -251,4 +251,32 @@ describe("agent 模式切换", () => {
 		expect(notifies.some((m) => m.includes("主题"))).toBe(true);
 		expect(status.at(-1)?.text).toContain("yolo");
 	});
+
+	test("plan→build 状态用新主题着色，不残留黄主题 accent（fixes build 变黄）", async () => {
+		const { pi, shortcuts } = stubPi();
+		cCodeExtension(pi as never);
+		const shortcut = shortcuts.find((s) => s.id === "shift+tab");
+		const themes: Record<string, { fg: (name: string, text: string) => string }> = {
+			"c-code-green": { fg: (name: string, text: string) => `<green:${name}>${text}</>` },
+			"c-code-yellow": { fg: (name: string, text: string) => `<yellow:${name}>${text}</>` },
+			"c-code-red": { fg: (name: string, text: string) => `<red:${name}>${text}</>` },
+		};
+		const status: { key: string; text: string | undefined }[] = [];
+		const ui = {
+			setStatus: (key: string, text: string | undefined) => status.push({ key, text }),
+			notify: () => {},
+			select: async () => "拒绝",
+			theme: themes["c-code-green"]!,
+			setTheme: (name: string) => {
+				ui.theme = themes[name]!;
+				return { success: true };
+			},
+		};
+		const ctx = { hasUI: true, ui };
+		await shortcut?.handler(ctx as never); // build→yolo（red）
+		await shortcut?.handler(ctx as never); // yolo→plan（yellow）
+		await shortcut?.handler(ctx as never); // plan→build（green）
+		expect(status.at(-1)?.text).toContain("build");
+		expect(status.at(-1)?.text).toContain("<green:accent>");
+	});
 });

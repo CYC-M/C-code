@@ -68,7 +68,7 @@
 	"engines": {
 		"node": ">=22.19.0"
 	},
-	"version": "0.0.1-beta",
+	"version": "0.1.0-beta",
 	"overrides": {
 		"protobufjs": "7.6.6"
 	}

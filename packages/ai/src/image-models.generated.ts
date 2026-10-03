@@ -5,6 +5,21 @@ import type { ImagesApi, ImagesModel } from "./types.ts";
 
 export const IMAGE_MODELS = {
 	openrouter: {
+		"black-forest-labs/flux-3-image": {
+			id: "black-forest-labs/flux-3-image",
+			name: "Black Forest Labs: FLUX.3 Image",
+			api: "openrouter-images",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			input: ["text", "image"],
+			output: ["image"],
+			cost: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+		} satisfies ImagesModel<"openrouter-images">,
 		"black-forest-labs/flux.2-flex": {
 			id: "black-forest-labs/flux.2-flex",
 			name: "Black Forest Labs: FLUX.2 Flex",
@@ -72,6 +87,21 @@ export const IMAGE_MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			input: ["image", "text"],
+			output: ["image"],
+			cost: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+		} satisfies ImagesModel<"openrouter-images">,
+		"bytedance-seed/seedream-5-0-flash": {
+			id: "bytedance-seed/seedream-5-0-flash",
+			name: "ByteDance Seed: Seedream 5.0 Flash",
+			api: "openrouter-images",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			input: ["text", "image"],
 			output: ["image"],
 			cost: {
 				input: 0,
@@ -207,6 +237,21 @@ export const IMAGE_MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			input: ["text"],
+			output: ["image"],
+			cost: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+		} satisfies ImagesModel<"openrouter-images">,
+		"inclusionai/ming-image-0.1-design-layer": {
+			id: "inclusionai/ming-image-0.1-design-layer",
+			name: "inclusionAI: Ming Image 0.1 Design Layer",
+			api: "openrouter-images",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			input: ["text", "image"],
 			output: ["image"],
 			cost: {
 				input: 0,
@@ -657,6 +702,21 @@ export const IMAGE_MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			input: ["text", "image"],
+			output: ["image"],
+			cost: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+		} satisfies ImagesModel<"openrouter-images">,
+		"recraft/recraft-v4.1-flash": {
+			id: "recraft/recraft-v4.1-flash",
+			name: "Recraft: Recraft V4.1 Flash",
+			api: "openrouter-images",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			input: ["text"],
 			output: ["image"],
 			cost: {
 				input: 0,

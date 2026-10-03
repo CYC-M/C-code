@@ -1,4 +1,4 @@
-# C-code Agent Harness (v0.0.1-beta)
+# C-code Agent Harness (v0.1.0-beta)
 
 Independent fork of the Pi agent harness. Self-contained development from here on; no upstream sync.
 
