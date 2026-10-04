@@ -349,6 +349,8 @@ export class TeamworkSidebarComponent extends VStack {
 			text = folded
 				? text.replace(/●?$/, `${SPIN_FRAMES[this.spinFrame % SPIN_FRAMES.length]}`)
 				: text.replace(/^· /, `${SPIN_FRAMES[this.spinFrame % SPIN_FRAMES.length]} `);
+		} else if (!row.title && row.text.startsWith("· ")) {
+			text = text.replace(/^· /, `${theme.fg("dim", "●")} `);
 		}
 		// Titles follow the mode accent (plan黄/build绿/yolo红 via the active
 		// theme); values stay default text so working rows stand out.

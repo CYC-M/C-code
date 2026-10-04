@@ -171,6 +171,7 @@ import {
 	type TeamworkSidebarData,
 	toTeamworkMemberStatuses,
 } from "./components/teamwork-sidebar.ts";
+import { formatTeamworkStatusLines, TeamworkStatusComponent } from "./components/teamwork-status.ts";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
@@ -458,6 +459,7 @@ export class InteractiveMode {
 	private statusContainer: Container;
 	private teamworkContainer: Container;
 	private teamworkPanel: TeamworkPanelComponent | undefined = undefined;
+	private teamworkStatus: TeamworkStatusComponent | undefined = undefined;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
 	private editorComponentFactory: EditorFactory | undefined;
@@ -2404,6 +2406,7 @@ export class InteractiveMode {
 		}
 		this.extensionWidgetsAbove.clear();
 		this.extensionWidgetsBelow.clear();
+		this.teamworkStatus = undefined;
 		this.renderWidgets();
 		if (this.teamworkMode) this.updateTeamworkModeUI();
 	}
@@ -3608,6 +3611,7 @@ export class InteractiveMode {
 						// Update first so the sidebar paints the current event, not the previous one.
 						this.teamworkPanel.updateFromEvent(teamwork);
 						this.layoutTeamworkSide();
+						this.updateTeamworkStatusBlock();
 					}
 				}
 				break;
@@ -3629,6 +3633,7 @@ export class InteractiveMode {
 					}
 					this.teamworkPanel.collapse();
 					this.layoutTeamworkSide();
+					this.updateTeamworkStatusBlock();
 				}
 				break;
 			}
@@ -3646,6 +3651,7 @@ export class InteractiveMode {
 				this.pendingTools.clear();
 
 				if (this.teamworkMode) this.layoutTeamworkSide();
+				this.updateTeamworkStatusBlock();
 				this.ui.requestRender();
 				break;
 
@@ -5353,8 +5359,41 @@ export class InteractiveMode {
 		}
 		this.renderWidgets();
 		this.layoutTeamworkSide();
+		this.updateTeamworkStatusBlock();
 		this.updateEditorBorderColor();
 		this.ui.requestRender();
+	}
+
+	private updateTeamworkStatusBlock(): void {
+		if (!this.teamworkMode) {
+			const old = this.extensionWidgetsBelow.get("teamwork-status");
+			if (old) {
+				old.dispose?.();
+				this.extensionWidgetsBelow.delete("teamwork-status");
+				this.renderWidgets();
+			}
+			this.teamworkStatus = undefined;
+			return;
+		}
+		const lines = formatTeamworkStatusLines(this.teamworkPanel?.getSnapshot(), this.settingsManager.getRoleModels(), {
+			provider: this.session.model?.provider ?? "?",
+			id: this.session.model?.id ?? "?",
+			thinkingLevel: this.session.thinkingLevel,
+		});
+		if (lines.length === 0) {
+			const old = this.extensionWidgetsBelow.get("teamwork-status");
+			if (old) {
+				old.dispose?.();
+				this.extensionWidgetsBelow.delete("teamwork-status");
+				this.renderWidgets();
+			}
+			this.teamworkStatus = undefined;
+			return;
+		}
+		if (!this.teamworkStatus) this.teamworkStatus = new TeamworkStatusComponent(this.ui);
+		this.teamworkStatus.setLines(lines);
+		this.extensionWidgetsBelow.set("teamwork-status", this.teamworkStatus);
+		this.renderWidgets();
 	}
 
 	private async applyTeamworkLeaderOverride(): Promise<void> {
@@ -5455,6 +5494,7 @@ export class InteractiveMode {
 		this.session.setTeamworkWorkerBindingsHook(async (roles, labels, previews) => {
 			await ensureWorkerBindings(this.buildTeamworkWizardDeps(), roles, labels, previews);
 			if (this.teamworkMode) this.layoutTeamworkSide();
+			this.updateTeamworkStatusBlock();
 		});
 	}
 

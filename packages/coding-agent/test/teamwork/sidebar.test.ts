@@ -5,7 +5,7 @@ import {
 	TeamworkSidebarComponent,
 	toTeamworkMemberStatuses,
 } from "../../src/modes/interactive/components/teamwork-sidebar.ts";
-import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
+import { initTheme, theme } from "../../src/modes/interactive/theme/theme.ts";
 
 beforeAll(() => {
 	initTheme("dark");
@@ -520,5 +520,56 @@ describe("teamwork sidebar working indicators", () => {
 		const fold = rows.find((row) => row.text.startsWith("…"));
 		expect(fold?.active).toBe(true);
 		expect(fold?.text).toContain("●");
+	});
+});
+
+describe("teamwork sidebar breathing lamp", () => {
+	it("exposes idle bullet rows for the wrapRow lamp", () => {
+		const rows = formatTeamworkSidebarRows({ ...base, statuses: undefined });
+		const workerRow = rows.find((row) => row.role === "worker-a");
+		expect(workerRow?.active).toBe(false);
+		expect(workerRow?.text.startsWith("· ")).toBe(true);
+	});
+
+	it("marks idle member rows with lamp text while keeping active flag false", () => {
+		const rows = formatTeamworkSidebarRows({ ...base, statuses: undefined });
+		const lampTargets = rows.filter((row) => !row.title && row.text.startsWith("· "));
+		expect(lampTargets.length).toBeGreaterThan(0);
+		for (const row of lampTargets) expect(row.active).toBe(false);
+	});
+
+	it("flags the working member active so wrapRow renders the spin frame", () => {
+		const rows = formatTeamworkSidebarRows({
+			...base,
+			statuses: { leader: "pending", workers: { "worker-a": "working" }, reviewer: "pending" },
+		});
+		expect(rows.find((row) => row.role === "worker-a")?.active).toBe(true);
+		expect(rows.find((row) => row.role === "worker-b")?.active).toBe(false);
+	});
+
+	it("renders idle lamps, active spin frames, and lamp-free titles", () => {
+		const idle = new TeamworkSidebarComponent({ requestRender: () => {} } as never, {
+			...base,
+			statuses: undefined,
+		});
+		const idleText = idle.render(60).join("\n");
+		expect(idleText).toContain(theme.fg("dim", "●"));
+		const strippedIdle = idleText.replace(/\[[0-9;]*m/g, "");
+		expect(strippedIdle).toContain("● worker-a(");
+		expect(strippedIdle).not.toContain("· worker-a(");
+		const titleLine = strippedIdle.split("\n").find((line) => line.includes("Workers"));
+		expect(titleLine).toBeDefined();
+		expect(titleLine).not.toContain("●");
+		idle.dispose();
+		const active = new TeamworkSidebarComponent({ requestRender: () => {} } as never, {
+			...base,
+			statuses: { leader: "pending", workers: { "worker-a": "working" }, reviewer: "pending" },
+		});
+		const strippedActive = active
+			.render(60)
+			.join("\n")
+			.replace(/\[[0-9;]*m/g, "");
+		expect(strippedActive).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] worker-a\(/);
+		active.dispose();
 	});
 });
