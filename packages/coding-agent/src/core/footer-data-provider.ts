@@ -96,6 +96,12 @@ function shouldPollGitHead(repoDir: string): boolean {
  * Provides git branch and extension statuses - data not otherwise accessible to extensions.
  * Context usage on ctx.getContextUsage(), token stats on ctx.sessionManager.getEntries(), model info on ctx.model.
  */
+/** One teamwork status row for the footer model slot. Structural match for the sidebar status lines. */
+export interface TeamworkStatusLine {
+	text: string;
+	active: boolean;
+}
+
 export class FooterDataProvider {
 	private cwd: string;
 	private static readonly WATCH_DEBOUNCE_MS = 500;
@@ -111,6 +117,7 @@ export class FooterDataProvider {
 	private reftableTablesListPath: string | null = null;
 	private branchChangeCallbacks = new Set<() => void>();
 	private availableProviderCount = 0;
+	private teamworkStatusLines: TeamworkStatusLine[] = [];
 	private refreshTimer: ReturnType<typeof setTimeout> | null = null;
 	private gitWatcherRetryTimer: ReturnType<typeof setTimeout> | null = null;
 	private refreshInFlight = false;
@@ -164,6 +171,16 @@ export class FooterDataProvider {
 	/** Internal: update available provider count */
 	setAvailableProviderCount(count: number): void {
 		this.availableProviderCount = count;
+	}
+
+	/** Teamwork status rows for the footer model slot. Empty while idle. */
+	getTeamworkStatusLines(): TeamworkStatusLine[] {
+		return this.teamworkStatusLines;
+	}
+
+	/** Internal: replace teamwork status rows */
+	setTeamworkStatusLines(lines: TeamworkStatusLine[]): void {
+		this.teamworkStatusLines = lines;
 	}
 
 	setCwd(cwd: string): void {
@@ -384,5 +401,5 @@ export class FooterDataProvider {
 /** Read-only view for extensions - excludes setExtensionStatus, setAvailableProviderCount and dispose */
 export type ReadonlyFooterDataProvider = Pick<
 	FooterDataProvider,
-	"getGitBranch" | "getExtensionStatuses" | "getAvailableProviderCount" | "onBranchChange"
+	"getGitBranch" | "getExtensionStatuses" | "getAvailableProviderCount" | "getTeamworkStatusLines" | "onBranchChange"
 >;

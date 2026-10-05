@@ -61,6 +61,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private onSelectAsDefaultCallback?: (model: Model<any>) => void;
 	private onNeedAuthCallback?: (model: Model<any>, persist: boolean) => void;
 	private onCancelCallback: () => void;
+	private recentModels: { provider: string; id: string }[] = [];
 	private errorMessage?: string;
 	private refreshStatusMessage = "Refreshing model catalogs…";
 	private refreshStatusSuccess = false;
@@ -85,11 +86,13 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		onSelectAsDefault?: (model: Model<any>) => void,
 		defaultModel?: DefaultModelReference,
 		onNeedAuth?: (model: Model<any>, persist: boolean) => void,
+		recentModels?: { provider: string; id: string }[],
 	) {
 		super();
 
 		this.tui = tui;
 		this.currentModel = currentModel;
+		this.recentModels = recentModels ?? [];
 		this.modelRuntime = modelRuntime;
 		this.scopedModels = scopedModels;
 		this.defaultModel = defaultModel;
@@ -235,12 +238,19 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 	private sortModels(models: ModelItem[]): ModelItem[] {
 		const sorted = [...models];
-		// Sort: current model first, default model second, then by provider.
+		const recentRank = (item: ModelItem): number => {
+			const index = this.recentModels.findIndex((r) => r.provider === item.provider && r.id === item.id);
+			return index === -1 ? Number.MAX_SAFE_INTEGER : index;
+		};
+		// Sort: current model first, recently used second, default model third, then by provider.
 		sorted.sort((a, b) => {
 			const aIsCurrent = modelsAreEqual(this.currentModel, a.model);
 			const bIsCurrent = modelsAreEqual(this.currentModel, b.model);
 			if (aIsCurrent && !bIsCurrent) return -1;
 			if (!aIsCurrent && bIsCurrent) return 1;
+			const aRecent = recentRank(a);
+			const bRecent = recentRank(b);
+			if (aRecent !== bRecent) return aRecent - bRecent;
 			const aIsDefault = this.isDefaultModel(a.model);
 			const bIsDefault = this.isDefaultModel(b.model);
 			if (aIsDefault && !bIsDefault) return -1;

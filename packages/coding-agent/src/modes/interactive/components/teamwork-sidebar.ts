@@ -46,6 +46,11 @@ export interface TeamworkSidebarData {
 	spinning: boolean;
 	/** Live per-member statuses from the run panel. Absent while idle. */
 	statuses?: TeamworkMemberStatuses;
+	/**
+	 * Synchronous auth probe per provider (`modelRuntime.hasConfiguredAuth`).
+	 * Absent (e.g. unit tests) keeps the legacy neutral dim lamp.
+	 */
+	hasAuth?: (provider: string) => boolean;
 }
 
 /** Worker rows shown when the available height is unknown. */
@@ -106,6 +111,11 @@ export interface TeamworkSidebarRow {
 	role?: string;
 	/** True while this member is actively working: render the spinning frame. */
 	active: boolean;
+	/**
+	 * Idle connection lamp for member rows. Absent for titles and non-member
+	 * rows (legacy dim bullet). `active` rows always render the spin frame.
+	 */
+	lamp?: "ok" | "noauth" | "unbound";
 	title?: boolean;
 	dim?: boolean;
 	/**
@@ -149,7 +159,11 @@ export interface TeamworkSidebarSections {
 /** Worker role ids from the configured bindings plus any role the live run reported. */
 export function sidebarWorkerRoles(data: TeamworkSidebarData): string[] {
 	const configured = Object.keys(data.roleModels ?? {}).filter((role) => role !== "leader" && role !== "reviewer");
-	const live = Object.keys(data.statuses?.workers ?? {});
+	// Display matches bindings: a live role left over from a finished run (whose
+	// binding was cleared) stays hidden unless it is actively working right now.
+	const live = Object.keys(data.statuses?.workers ?? {}).filter(
+		(role) => configured.includes(role) || data.statuses?.workers[role] === "working",
+	);
 	const roles = new Set([...configured, ...live]);
 	return [...roles].sort(compareWorkerRoleIds);
 }
@@ -191,13 +205,18 @@ export function formatTeamworkSidebarSections(data: TeamworkSidebarData): Teamwo
 		if (role === "reviewer") return statuses.reviewer === "reviewing";
 		return statuses.workers[role] === "working";
 	};
+	const lampFor = (ref: RoleModelRef | undefined): TeamworkSidebarRow["lamp"] => {
+		if (!ref) return "unbound";
+		if (!data.hasAuth) return undefined;
+		return data.hasAuth(ref.provider) ? "ok" : "noauth";
+	};
 	const before: TeamworkSidebarRow[] = [
 		{ text: "会话", active: false, title: true },
 		{ text: `· ${data.sessionLine}`, active: false },
 		{ text: "Context", active: false, title: true },
 		{ text: `· ${data.contextLine}`, active: false },
 		{ text: "Leader", active: false, title: true },
-		{ text: `· ${formatSidebarBinding(leader)}`, active: isActive("leader"), role: "leader" },
+		{ text: `· ${formatSidebarBinding(leader)}`, active: isActive("leader"), role: "leader", lamp: lampFor(leader) },
 		{ text: "Workers", active: false, title: true },
 	];
 	const workerRows: TeamworkSidebarRow[] = workers.map((role) => {
@@ -210,6 +229,7 @@ export function formatTeamworkSidebarSections(data: TeamworkSidebarData): Teamwo
 			text: description ? `· ${label} · ${binding}` : `· ${label}(${binding})`,
 			active: isActive(role),
 			role,
+			lamp: lampFor(ref),
 		};
 	});
 	const after: TeamworkSidebarRow[] = [
@@ -218,6 +238,7 @@ export function formatTeamworkSidebarSections(data: TeamworkSidebarData): Teamwo
 			text: reviewer ? `· ${formatSidebarBinding(reviewer)}` : "· 未配置",
 			active: isActive("reviewer"),
 			role: "reviewer",
+			lamp: lampFor(reviewer),
 			dim: reviewer === undefined,
 		},
 	];
@@ -350,7 +371,15 @@ export class TeamworkSidebarComponent extends VStack {
 				? text.replace(/●?$/, `${SPIN_FRAMES[this.spinFrame % SPIN_FRAMES.length]}`)
 				: text.replace(/^· /, `${SPIN_FRAMES[this.spinFrame % SPIN_FRAMES.length]} `);
 		} else if (!row.title && row.text.startsWith("· ")) {
-			text = text.replace(/^· /, `${theme.fg("dim", "●")} `);
+			const lamp =
+				row.lamp === "ok"
+					? theme.fg("success", "●")
+					: row.lamp === "noauth"
+						? theme.fg("error", "●")
+						: row.lamp === "unbound"
+							? theme.fg("dim", "○")
+							: theme.fg("dim", "●");
+			text = text.replace(/^· /, `${lamp} `);
 		}
 		// Titles follow the mode accent (plan黄/build绿/yolo红 via the active
 		// theme); values stay default text so working rows stand out.

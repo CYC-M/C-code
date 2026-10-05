@@ -48,6 +48,14 @@ export interface TeamUsage {
 	cacheRead: number;
 	cacheWrite: number;
 	total: number;
+	/** Provider-priced cost when the client reports it; absent from custom clients. */
+	cost?: {
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+		total: number;
+	};
 }
 
 export interface WorkerResult {

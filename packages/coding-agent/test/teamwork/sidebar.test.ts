@@ -573,3 +573,64 @@ describe("teamwork sidebar breathing lamp", () => {
 		active.dispose();
 	});
 });
+
+describe("teamwork sidebar connection lamps", () => {
+	const authed = { ...base, hasAuth: () => true };
+	const unauthed = { ...base, hasAuth: () => false };
+
+	it("marks bound members ok when auth is configured", () => {
+		const rows = formatTeamworkSidebarRows(authed);
+		expect(rows.find((row) => row.role === "worker-a")?.lamp).toBe("ok");
+		expect(rows.find((row) => row.role === "leader")?.lamp).toBe("ok");
+	});
+
+	it("marks bound members noauth when auth is missing", () => {
+		const rows = formatTeamworkSidebarRows(unauthed);
+		expect(rows.find((row) => row.role === "worker-a")?.lamp).toBe("noauth");
+	});
+
+	it("hides live workers that lost their bindings once idle", () => {
+		const rows = formatTeamworkSidebarRows({
+			...base,
+			hasAuth: () => true,
+			roleModels: {
+				leader: { provider: "x", model: "lead" },
+				"worker-a": { provider: "o", model: "same" },
+			},
+			statuses: { leader: "pending", workers: { "worker-z": "completed" }, reviewer: "pending" },
+		});
+		expect(rows.find((row) => row.role === "worker-z")).toBeUndefined();
+		expect(rows.find((row) => row.role === "reviewer")?.lamp).toBe("unbound");
+	});
+
+	it("keeps a working live worker visible even before its binding lands", () => {
+		const rows = formatTeamworkSidebarRows({
+			...base,
+			hasAuth: () => true,
+			roleModels: {
+				leader: { provider: "x", model: "lead" },
+				"worker-a": { provider: "o", model: "same" },
+			},
+			statuses: { leader: "pending", workers: { "worker-z": "working" }, reviewer: "pending" },
+		});
+		const live = rows.find((row) => row.role === "worker-z");
+		expect(live?.lamp).toBe("unbound");
+		expect(live?.active).toBe(true);
+	});
+
+	it("renders green, red, and hollow lamps", () => {
+		const okView = new TeamworkSidebarComponent({ requestRender: () => {} } as never, authed);
+		expect(okView.render(60).join("\n")).toContain(theme.fg("success", "●"));
+		okView.dispose();
+		const badView = new TeamworkSidebarComponent({ requestRender: () => {} } as never, unauthed);
+		expect(badView.render(60).join("\n")).toContain(theme.fg("error", "●"));
+		badView.dispose();
+		const bareView = new TeamworkSidebarComponent({ requestRender: () => {} } as never, {
+			...base,
+			hasAuth: () => true,
+			roleModels: { leader: { provider: "x", model: "lead" } },
+		});
+		expect(bareView.render(60).join("\n")).toContain(theme.fg("dim", "○"));
+		bareView.dispose();
+	});
+});

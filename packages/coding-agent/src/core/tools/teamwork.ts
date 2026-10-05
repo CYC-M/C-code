@@ -10,13 +10,21 @@ import { summarizeResults } from "../teamwork/context.ts";
 import {
 	canonicalizeWorkerTaskRoles,
 	formatWorkerLabel,
+	RESERVED_ROLE_IDS,
 	workerDescriptionsInTasks,
 	workerRolesInTasks,
 } from "../teamwork/naming.ts";
 import { runTeamRound, type WorkerModelClient } from "../teamwork/orchestrator.ts";
 import { assembleTeamConfig, WORKER_PROMPT } from "../teamwork/roles.ts";
 import { continueRun, createRun } from "../teamwork/state.ts";
-import type { RoleModelRef, TeamRunState, TeamTask, TeamworkEvent, TeamworkWorkerPreview } from "../teamwork/types.ts";
+import type {
+	RoleModelRef,
+	TeamRunState,
+	TeamTask,
+	TeamUsage,
+	TeamworkEvent,
+	TeamworkWorkerPreview,
+} from "../teamwork/types.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 export interface TeamworkToolOptions {
@@ -268,6 +276,7 @@ export function createTeamworkToolDefinition(
 										cacheRead: usage.cacheRead,
 										cacheWrite: usage.cacheWrite,
 										total: usage.totalTokens,
+										...(usage.cost === undefined ? {} : { cost: usage.cost }),
 									},
 								}),
 					};
@@ -293,6 +302,37 @@ export function createTeamworkToolDefinition(
 				final = run;
 			}
 			options?.sessionManager?.appendCustomEntry("teamwork-run", final);
+			// Attribute worker/reviewer spend to their own models so the footer
+			// totals and per-model breakdown stop showing leader-only numbers.
+			// Recorded once per final state (a retry re-spends, so it records again).
+			const recordUsage = (u: TeamUsage | undefined, provider: string, model: string, note: string): void => {
+				if (u === undefined) return;
+				options?.sessionManager?.appendUsage?.(
+					"teamwork",
+					provider,
+					model,
+					{
+						input: u.input,
+						output: u.output,
+						cacheRead: u.cacheRead,
+						cacheWrite: u.cacheWrite,
+						totalTokens: u.total,
+						cost: u.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					note,
+				);
+			};
+			for (const r of Object.values(final.results)) recordUsage(r.usage, r.model.provider, r.model.id, r.taskId);
+			const reviewerRef = run.team.roles[run.team.reviewer];
+			const lastReview = final.reviews[final.reviews.length - 1];
+			if (lastReview?.usage !== undefined && reviewerRef) {
+				recordUsage(lastReview.usage, reviewerRef.provider, reviewerRef.model, "review");
+			}
+			// Worker bindings are single-use: the next task re-binds its models.
+			// Leader and reviewer survive; a continueRunId retry re-prompts for workers.
+			for (const role of Object.keys(run.team.roles)) {
+				if (!RESERVED_ROLE_IDS.has(role)) settings?.clearRoleModel?.(role);
+			}
 			const review = final.reviews[final.reviews.length - 1];
 			const summary = [
 				`Team run ${final.runId}: ${final.phase}${final.downgraded ? " (downgraded)" : ""}`,

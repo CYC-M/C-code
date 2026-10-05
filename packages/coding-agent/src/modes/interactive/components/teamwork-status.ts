@@ -18,6 +18,14 @@ export interface TeamworkStatusSessionModel {
 
 const MAX_STATUS_LINES = 4;
 
+function capStatusLines(lines: TeamworkStatusLine[]): TeamworkStatusLine[] {
+	if (lines.length > MAX_STATUS_LINES) {
+		// Budget: 4 lines; workers first, reviewer may drop in large teams (by design).
+		return [...lines.slice(0, MAX_STATUS_LINES), { text: `…${lines.length - MAX_STATUS_LINES} more`, active: false }];
+	}
+	return lines;
+}
+
 function statusWorkerLabel(roleId: string, description?: string): string {
 	const trimmed = description?.trim();
 	return trimmed ? `${roleId}-${trimmed}` : roleId;
@@ -76,11 +84,7 @@ export function formatTeamworkStatusLines(
 			active: true,
 		});
 	}
-	if (lines.length > MAX_STATUS_LINES) {
-		// Budget: 4 lines; workers first, reviewer may drop in large teams (by design).
-		return [...lines.slice(0, MAX_STATUS_LINES), { text: `…${lines.length - MAX_STATUS_LINES} more`, active: false }];
-	}
-	return lines;
+	return capStatusLines(lines);
 }
 
 export class TeamworkStatusComponent extends Container {

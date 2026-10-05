@@ -93,7 +93,15 @@ import type {
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
-import { loadMcpConfigFile, type McpFileConfig, type McpServerConfig } from "../../core/mcp-manager.ts";
+import {
+	getMcpAuthPath,
+	loadMcpConfigFile,
+	loadMergedMcpConfig,
+	type McpFileConfig,
+	type McpServerConfig,
+	persistMcpEnvValue,
+	resolveMcpEnvValue,
+} from "../../core/mcp-manager.ts";
 import { createCompactionSummaryMessage, createCustomMessage } from "../../core/messages.ts";
 import {
 	defaultModelPerProvider,
@@ -5171,6 +5179,8 @@ export class InteractiveMode {
 					undefined,
 					undefined,
 					defaultModel,
+					undefined,
+					this.settingsManager.getRecentModels(),
 				);
 			},
 			settingsManager: this.settingsManager,
@@ -5303,6 +5313,7 @@ export class InteractiveMode {
 			...(mcpSnapshot.error === undefined ? {} : { mcpError: mcpSnapshot.error }),
 			...(Object.keys(workerDescriptions).length === 0 ? {} : { workerDescriptions }),
 			...(snapshot === undefined ? {} : { statuses: toTeamworkMemberStatuses(snapshot) }),
+			hasAuth: (provider: string) => this.session.modelRuntime.hasConfiguredAuth(provider),
 			// The sidebar spans the fullscreen height; keep a row for the terminal prompt.
 			viewportHeight: Math.max(8, this.ui.terminal.rows - 1),
 			spinning: this.session.isStreaming,
@@ -5373,14 +5384,18 @@ export class InteractiveMode {
 				this.renderWidgets();
 			}
 			this.teamworkStatus = undefined;
+			this.footerDataProvider.setTeamworkStatusLines([]);
 			return;
 		}
-		const lines = formatTeamworkStatusLines(this.teamworkPanel?.getSnapshot(), this.settingsManager.getRoleModels(), {
+		const snapshot = this.teamworkPanel?.getSnapshot();
+		const roleModels = this.settingsManager.getRoleModels();
+		const sessionModel = {
 			provider: this.session.model?.provider ?? "?",
 			id: this.session.model?.id ?? "?",
 			thinkingLevel: this.session.thinkingLevel,
-		});
-		if (lines.length === 0) {
+		};
+		const active = formatTeamworkStatusLines(snapshot, roleModels, sessionModel);
+		if (active.length === 0) {
 			const old = this.extensionWidgetsBelow.get("teamwork-status");
 			if (old) {
 				old.dispose?.();
@@ -5388,11 +5403,13 @@ export class InteractiveMode {
 				this.renderWidgets();
 			}
 			this.teamworkStatus = undefined;
+			this.footerDataProvider.setTeamworkStatusLines([]);
 			return;
 		}
 		if (!this.teamworkStatus) this.teamworkStatus = new TeamworkStatusComponent(this.ui);
-		this.teamworkStatus.setLines(lines);
+		this.teamworkStatus.setLines(active);
 		this.extensionWidgetsBelow.set("teamwork-status", this.teamworkStatus);
+		this.footerDataProvider.setTeamworkStatusLines(active);
 		this.renderWidgets();
 	}
 
@@ -5458,19 +5475,12 @@ export class InteractiveMode {
 		}
 	}
 
-	private async offerTeamworkWorkerSetup(): Promise<void> {
-		const hasWorkers = Object.keys(this.settingsManager.getRoleModels() ?? {}).some(
-			(role) => role !== "leader" && role !== "reviewer",
-		);
-		if (hasWorkers) return;
-		await runAddWorkers(this.buildTeamworkWizardDeps());
-	}
-
 	private async enterTeamworkMode(): Promise<void> {
 		if (!this.teamworkMode) this.activateTeamworkMode();
 		await runTeamworkInitialSetup(this.buildTeamworkWizardDeps(), this.settingsManager.getRoleModels());
 		await this.applyTeamworkLeaderOverride();
-		await this.offerTeamworkWorkerSetup();
+		// Worker bindings are per-task: missing workers prompt mid-run via the
+		// bindings hook, so entering the mode stays silent when none are bound.
 		this.updateTeamworkModeUI();
 		const summary = buildRoleBindingSummary(this.settingsManager.getRoleModels());
 		this.showStatus(
@@ -5753,6 +5763,7 @@ export class InteractiveMode {
 				try {
 					// 切换即记住：任何入口选中的模型都写成默认，下次启动沿用。
 					await this.session.setModel(model, { persist: true });
+					this.settingsManager.recordRecentModel(model.provider, model.id);
 					this.updateAvailableProviderCount();
 					this.footer.invalidate();
 					this.updateEditorBorderColor();
@@ -5810,6 +5821,7 @@ export class InteractiveMode {
 				(model) => selectModel(model),
 				defaultProvider && defaultModel ? { provider: defaultProvider, id: defaultModel } : undefined,
 				(model) => authenticateForModel(model),
+				this.settingsManager.getRecentModels(),
 			);
 			return { component: selector, focus: selector, dispose: () => selector.dispose() };
 		});
@@ -7410,12 +7422,16 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Core MCP servers: status, reconnect, and guided add.
-	 * Keys always stay in `{env:VAR}` form; export them in the shell.
+	 * Core MCP servers: status, reconnect, guided add, and doctor.
+	 * Keys persist in auth.json (`{env:VAR}` resolves env first, auth.json fallback).
 	 */
 	private async handleMcpCommand(args: string): Promise<void> {
 		const parts = args.split(/\s+/).filter((part) => part.length > 0);
 		const sub = parts[0] ?? "status";
+		if (sub === "doctor") {
+			this.handleMcpDoctorCommand();
+			return;
+		}
 		if (sub === "status") {
 			const snapshot = this.session.getMcpSnapshot();
 			if (snapshot.error !== undefined && snapshot.servers.length === 0) {
@@ -7451,16 +7467,63 @@ export class InteractiveMode {
 			this.handleMcpAddCommand(parts.slice(1));
 			return;
 		}
-		this.showError("用法：/mcp [status|reconnect [server]|add <name> <url> [--no-auth] [--project]]");
+		this.showError(
+			"用法：/mcp [status|doctor|reconnect [server]|add <name> <url> [--no-auth] [--project] [--key <secret>]]",
+		);
+	}
+
+	private handleMcpDoctorCommand(): void {
+		const merged = loadMergedMcpConfig(this.sessionManager.getCwd(), {
+			agentDir: getAgentDir(),
+			projectTrusted: this.settingsManager.isProjectTrusted(),
+		});
+		const snapshot = this.session.getMcpSnapshot();
+		const lines: string[] = [];
+		lines.push(`全局: ${merged.paths.globalPath ?? "(缺失，将用内置默认)"}`);
+		lines.push(
+			`项目: ${merged.paths.projectPath ?? "(无)"}${this.settingsManager.isProjectTrusted() ? "" : " (未信任，已忽略)"}`,
+		);
+		if (merged.paths.envPath) lines.push(`env覆盖: ${merged.paths.envPath}`);
+		lines.push(`auth: ${getMcpAuthPath(getAgentDir())}`);
+		if (merged.error) lines.push(`配置错误: ${merged.error}`);
+		for (const server of snapshot.servers) {
+			const state =
+				server.state === "ok"
+					? `ok (${server.toolCount})`
+					: `${server.state}${server.error ? ` (${server.error})` : ""}`;
+			lines.push(`- ${server.name}: ${state}`);
+		}
+		if (snapshot.error && snapshot.servers.length === 0) lines.push(`快照错误: ${snapshot.error}`);
+		this.showStatus(`MCP doctor\n${lines.join("\n")}`);
 	}
 
 	private handleMcpAddCommand(rest: string[]): void {
-		const flags = new Set(rest.filter((part) => part.startsWith("--")));
-		const positional = rest.filter((part) => !part.startsWith("--"));
+		const flags = new Set<string>();
+		const positional: string[] = [];
+		let keyValue: string | undefined;
+		for (let i = 0; i < rest.length; i += 1) {
+			const part = rest[i];
+			if (part === undefined) continue;
+			if (part.startsWith("--key=")) {
+				keyValue = part.slice("--key=".length);
+				flags.add("--key");
+			} else if (part === "--key") {
+				flags.add("--key");
+				const next = rest[i + 1];
+				if (next !== undefined && !next.startsWith("--")) {
+					keyValue = next;
+					i += 1;
+				}
+			} else if (part.startsWith("--")) {
+				flags.add(part);
+			} else {
+				positional.push(part);
+			}
+		}
 		const [name, url] = positional;
 		if (!name || !url || positional.length > 2) {
 			this.showError(
-				"用法：/mcp add <name> <url> [--no-auth] [--project]（例如 /mcp add originkit https://mcp.originkit.dev/mcp）",
+				"用法：/mcp add <name> <url> [--no-auth] [--project] [--key <secret>]（例如 /mcp add originkit https://mcp.originkit.dev/mcp --key xxx）",
 			);
 			return;
 		}
@@ -7514,10 +7577,29 @@ export class InteractiveMode {
 		}
 		void this.session.reconnectMcp(name);
 		const scope = project ? "项目" : "用户";
+		if (flags.has("--no-auth")) {
+			this.showStatus(`MCP ${name} 已写入${scope}级配置，正在连接`);
+			return;
+		}
+		// Once-configure: --key persists to auth.json; otherwise reuse live env/auth value.
+		const agentDir = getAgentDir();
+		let persisted = false;
+		const candidate = keyValue ?? process.env[envVar];
+		if (candidate) {
+			try {
+				persistMcpEnvValue(envVar, candidate, agentDir);
+				persisted = true;
+			} catch (error) {
+				this.showError(`MCP key 持久化失败: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+		const ready = resolveMcpEnvValue(envVar, agentDir) !== undefined;
 		this.showStatus(
-			flags.has("--no-auth")
-				? `MCP ${name} 已写入${scope}级配置，正在连接`
-				: `MCP ${name} 已写入${scope}级配置。先在 shell 里 export ${envVar}=...，正在连接（缺 key 会红灯）。`,
+			persisted
+				? `MCP ${name} 已写入${scope}级配置，key 已存 auth.json（终身有效），正在连接`
+				: ready
+					? `MCP ${name} 已写入${scope}级配置（key 来自 env/auth.json，已持久化逻辑覆盖重启），正在连接`
+					: `MCP ${name} 已写入${scope}级配置。用 /mcp add ${name} ${url} --key <你的key> 一次性存入（或 export ${envVar}=... 后会自动持久化）。`,
 		);
 	}
 

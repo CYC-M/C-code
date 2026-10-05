@@ -92,6 +92,7 @@ function createFooterData(providerCount: number): ReadonlyFooterDataProvider {
 		getGitBranch: () => "main",
 		getExtensionStatuses: () => new Map<string, string>(),
 		getAvailableProviderCount: () => providerCount,
+		getTeamworkStatusLines: () => [],
 		onBranchChange: (callback: () => void) => {
 			void callback;
 			return () => {};
@@ -271,5 +272,52 @@ describe("FooterComponent width handling", () => {
 
 		expect(stats).toContain("$1.234");
 		expect(stats).not.toContain("(sub)");
+	});
+});
+
+describe("FooterComponent teamwork model display", () => {
+	beforeAll(() => {
+		initTheme(undefined, false);
+	});
+
+	function teamworkProvider(lines: Array<{ text: string; active: boolean }>): ReadonlyFooterDataProvider {
+		return {
+			...createFooterData(1),
+			getTeamworkStatusLines: () => lines,
+		} as ReadonlyFooterDataProvider;
+	}
+
+	const workerLines = [
+		{ text: "【worker1-UI designer】kimi k3 high", active: true },
+		{ text: "【worker2-engineer】deepseek v4.1-flash xhigh", active: true },
+	];
+
+	it("lists active members vertically in place of the model name", () => {
+		const footer = new FooterComponent(createSession({ sessionName: "" }), teamworkProvider(workerLines));
+
+		const lines = footer.render(80).map((line) => stripAnsi(line));
+		expect(lines[1]?.endsWith("【worker1-UI designer】kimi k3 high")).toBe(true);
+		expect(lines[2]?.endsWith("【worker2-engineer】deepseek v4.1-flash xhigh")).toBe(true);
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(80);
+	});
+
+	it("truncates overlong teamwork lines with an ellipsis", () => {
+		const footer = new FooterComponent(
+			createSession({ sessionName: "" }),
+			teamworkProvider([{ text: `【worker1-UI designer】${"kimi ".repeat(30)}high`, active: true }]),
+		);
+
+		const lines = footer.render(60).map((line) => stripAnsi(line));
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(60);
+		expect(lines.join("\n")).toContain("…");
+	});
+
+	it("falls back to the single model name when no teamwork lines are present", () => {
+		const footer = new FooterComponent(
+			createSession({ sessionName: "", modelId: "test-model" }),
+			teamworkProvider([]),
+		);
+
+		expect(stripAnsi(footer.render(80)[1])).toContain("test-model");
 	});
 });

@@ -12,6 +12,12 @@ import { effectiveKeepRecentTokens, effectiveReserveTokens } from "./compaction/
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
 import type { RoleModelRef } from "./teamwork/types.ts";
 
+/** A recently used model, pinned first in model pickers. */
+export interface RecentModelRef {
+	provider: string;
+	id: string;
+}
+
 export interface CompactionModelOverride {
 	reserveTokens?: number;
 	keepRecentTokens?: number;
@@ -145,6 +151,7 @@ export interface Settings {
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
 	roleModels?: Record<string, RoleModelRef>; // roleId -> model binding for /teamwork (global+project merge, project wins)
+	recentModels?: RecentModelRef[]; // recently used models, most-recent-first (global only)
 	defaultTools?: string[]; // Initial built-in tool selection
 	doubleEscapeAction?: "fork" | "tree" | "none"; // Action for double-escape with empty editor (default: "tree")
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default filter when opening /tree
@@ -1381,6 +1388,23 @@ export class SettingsManager {
 	setRoleModel(role: string, ref: RoleModelRef): void {
 		this.globalSettings.roleModels = { ...(this.globalSettings.roleModels ?? {}), [role]: ref };
 		this.markModified("roleModels");
+		this.recordRecentModel(ref.provider, ref.model);
+		this.save();
+	}
+
+	/** Recently used models, most-recent-first. Empty when nothing was recorded yet. */
+	getRecentModels(): RecentModelRef[] {
+		return [...(this.settings.recentModels ?? [])];
+	}
+
+	/** Cap for persisted recently-used models shown first in model pickers. */
+	static readonly MAX_RECENT_MODELS = 10;
+
+	recordRecentModel(provider: string, id: string): void {
+		const recents = (this.globalSettings.recentModels ?? []).filter((r) => !(r.provider === provider && r.id === id));
+		recents.unshift({ provider, id });
+		this.globalSettings.recentModels = recents.slice(0, SettingsManager.MAX_RECENT_MODELS);
+		this.markModified("recentModels");
 		this.save();
 	}
 

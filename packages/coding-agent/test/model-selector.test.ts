@@ -188,4 +188,37 @@ describe("model selector", () => {
 		expect(onSelect).toHaveBeenCalledTimes(1);
 		selector.dispose();
 	});
+
+	it("lists recently used models before other models", async () => {
+		harness = await createHarness({
+			models: [
+				{ id: "current-model", name: "Current Model", reasoning: true },
+				{ id: "recent-model", name: "Recent Model", reasoning: true },
+				{ id: "other-model", name: "Other Model", reasoning: true },
+			],
+		});
+		const currentModel = harness.getModel("current-model")!;
+		const recent = harness.getModel("recent-model")!;
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			currentModel,
+			harness.session.modelRuntime,
+			[],
+			() => {},
+			() => {},
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			[{ provider: recent.provider, id: recent.id }],
+		);
+		const order = stripAnsi(selector.render(120).join("\n"));
+		const rows = order.split("\n");
+		expect(rows.findIndex((line) => line.includes("current-model ["))).toBeLessThan(
+			rows.findIndex((line) => line.includes("recent-model [")),
+		);
+		// other-model sorts after the visible window: recent outranks it.
+		expect(order).not.toContain("other-model [");
+		selector.dispose();
+	});
 });

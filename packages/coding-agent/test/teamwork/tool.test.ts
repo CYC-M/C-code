@@ -90,6 +90,87 @@ describe("teamwork tool", () => {
 		expect(text).toContain("review: in 50 out 20 cacheR 5 cacheW 0 total 75");
 	});
 
+	it("records per-model usage entries for workers and reviewer", async () => {
+		const usageCalls: { kind: string; provider: string; model: string; usage: unknown; note?: string }[] = [];
+		const tool = createTeamworkToolDefinition("/work", {
+			sessionManager: {
+				appendCustomEntry: () => "e1",
+				appendUsage: (kind: string, provider: string, model: string, usage: unknown, note?: string) => {
+					usageCalls.push({ kind, provider, model, usage, note });
+					return "u1";
+				},
+			} as unknown as SessionManager,
+			settingsManager: {
+				getRoleModels: () => ({ worker: { provider: "o", model: "m" }, reviewer: { provider: "o", model: "m" } }),
+			} as unknown as SettingsManager,
+		});
+		await tool.execute(
+			"call-1",
+			{ goal: "fix", tasks: [{ id: "t1", title: "t", goal: "g", role: "worker", successCriteria: ["c"] }] },
+			undefined,
+			undefined,
+			makeCtx(),
+		);
+		const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+		expect(usageCalls).toEqual([
+			{
+				kind: "teamwork",
+				provider: "o",
+				model: "m",
+				usage: { input: 100, output: 40, cacheRead: 10, cacheWrite: 0, totalTokens: 150, cost: zeroCost },
+				note: "t1",
+			},
+			{
+				kind: "teamwork",
+				provider: "o",
+				model: "m",
+				usage: { input: 50, output: 20, cacheRead: 5, cacheWrite: 0, totalTokens: 75, cost: zeroCost },
+				note: "review",
+			},
+		]);
+	});
+
+	it("clears worker bindings after the run but keeps leader and reviewer", async () => {
+		const store: Record<string, { provider: string; model: string }> = {
+			leader: { provider: "k", model: "lead" },
+			worker1: { provider: "o", model: "m" },
+			reviewer: { provider: "o", model: "r" },
+		};
+		const cleared: string[] = [];
+		const tool = createTeamworkToolDefinition("/work", {
+			sessionManager: {
+				appendCustomEntry: () => "e1",
+				appendUsage: () => "u1",
+			} as unknown as SessionManager,
+			settingsManager: {
+				getRoleModels: () => ({ ...store }),
+				setRoleModel: (role: string, ref: { provider: string; model: string }) => {
+					store[role] = ref;
+				},
+				clearRoleModel: (role: string) => {
+					cleared.push(role);
+					delete store[role];
+				},
+			} as unknown as SettingsManager,
+		});
+		await tool.execute(
+			"call-1",
+			{
+				goal: "fix",
+				tasks: [
+					{ id: "t1", title: "t", goal: "g", role: "worker1", roleDescription: "UI", successCriteria: ["c"] },
+				],
+			},
+			undefined,
+			undefined,
+			makeCtx(),
+		);
+		expect(cleared).toEqual(["worker1"]);
+		expect(store.worker1).toBeUndefined();
+		expect(store.leader).toBeDefined();
+		expect(store.reviewer).toBeDefined();
+	});
+
 	it("rejects empty tasks before running", async () => {
 		const tool = createTeamworkToolDefinition("/work", {
 			sessionManager: {} as unknown as SessionManager,

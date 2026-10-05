@@ -374,6 +374,26 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("recent models", () => {
+		it("records selections most-recent-first with dedupe and a cap of 10", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			for (let i = 0; i < 12; i++) manager.recordRecentModel(`p${i}`, `m${i}`);
+			expect(manager.getRecentModels()).toHaveLength(10);
+			expect(manager.getRecentModels()[0]).toEqual({ provider: "p11", id: "m11" });
+			manager.recordRecentModel("p0", "m0");
+			const recents = manager.getRecentModels();
+			expect(recents).toHaveLength(10);
+			expect(recents[0]).toEqual({ provider: "p0", id: "m0" });
+			expect(recents.some((r) => r.provider === "p1")).toBe(false);
+		});
+
+		it("records a teamwork role binding as a recent model", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setRoleModel("worker1", { provider: "o", model: "m" });
+			expect(manager.getRecentModels()).toEqual([{ provider: "o", id: "m" }]);
+		});
+	});
+
 	describe("httpIdleTimeoutMs", () => {
 		it("should default to 5 minutes", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

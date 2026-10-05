@@ -2,7 +2,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
-import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
+import type { ReadonlyFooterDataProvider, TeamworkStatusLine } from "../../../core/footer-data-provider.ts";
 import { addUsageToTotals, createUsageTotals } from "../../../core/usage-totals.ts";
 import { theme } from "../theme/theme.ts";
 
@@ -41,6 +41,23 @@ export function formatCwdForFooter(cwd: string, home: string | undefined): strin
 
 	if (!isInsideHome) return cwd;
 	return relativeToHome === "" ? "~" : `~${sep}${relativeToHome}`;
+}
+
+/**
+ * Build the right-side remainders for teamwork mode: stats stay left on the
+ * first row while active members stack vertically in place of the model name.
+ * Each row is truncated to fit, then styled (accent while active, dim otherwise).
+ */
+function alignTeamworkLines(teamLines: TeamworkStatusLine[], statsLeftWidth: number, width: number): string[] {
+	const minPadding = 2;
+	return teamLines.map((line, index) => {
+		const rowWidth = index === 0 ? width - statsLeftWidth : width;
+		const available = rowWidth - minPadding;
+		const truncated = available > 0 ? truncateToWidth(line.text, available, "…") : "";
+		const padding = " ".repeat(Math.max(0, rowWidth - visibleWidth(truncated)));
+		const styled = line.active ? theme.bold(theme.fg("accent", truncated)) : theme.fg("dim", truncated);
+		return `${padding}${styled}`;
+	});
 }
 
 /**
@@ -201,32 +218,40 @@ export class FooterComponent implements Component {
 
 		const rightSideWidth = visibleWidth(rightSide);
 		const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
+		const teamLines = this.footerData.getTeamworkStatusLines();
 
 		let statsLine: string;
-		if (totalNeeded <= width) {
-			// Both fit - add padding to right-align model
-			const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
-			statsLine = statsLeft + padding + rightSide;
-		} else {
-			// Need to truncate right side: drop the provider prefix first so the
-			// model id stays visible, then mark the cut with an ellipsis.
-			const availableForRight = width - statsLeftWidth - minPadding;
-			let truncatable = rightSide;
-			if (truncatable !== rightSideWithoutProvider) {
-				const withoutProviderNeeded = statsLeftWidth + minPadding + visibleWidth(rightSideWithoutProvider);
-				if (withoutProviderNeeded > width || visibleWidth(truncatable) > availableForRight) {
-					truncatable = rightSideWithoutProvider;
+		let teamRemainders: string[] = [];
+		if (teamLines.length === 0) {
+			if (totalNeeded <= width) {
+				// Both fit - add padding to right-align model
+				const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
+				statsLine = statsLeft + padding + rightSide;
+			} else {
+				// Need to truncate right side: drop the provider prefix first so the
+				// model id stays visible, then mark the cut with an ellipsis.
+				const availableForRight = width - statsLeftWidth - minPadding;
+				let truncatable = rightSide;
+				if (truncatable !== rightSideWithoutProvider) {
+					const withoutProviderNeeded = statsLeftWidth + minPadding + visibleWidth(rightSideWithoutProvider);
+					if (withoutProviderNeeded > width || visibleWidth(truncatable) > availableForRight) {
+						truncatable = rightSideWithoutProvider;
+					}
+				}
+				if (availableForRight > 0) {
+					const truncatedRight = truncateToWidth(truncatable, availableForRight, "…");
+					const truncatedRightWidth = visibleWidth(truncatedRight);
+					const padding = " ".repeat(Math.max(0, width - statsLeftWidth - truncatedRightWidth));
+					statsLine = statsLeft + padding + truncatedRight;
+				} else {
+					// Not enough space for right side at all
+					statsLine = statsLeft;
 				}
 			}
-			if (availableForRight > 0) {
-				const truncatedRight = truncateToWidth(truncatable, availableForRight, "…");
-				const truncatedRightWidth = visibleWidth(truncatedRight);
-				const padding = " ".repeat(Math.max(0, width - statsLeftWidth - truncatedRightWidth));
-				statsLine = statsLeft + padding + truncatedRight;
-			} else {
-				// Not enough space for right side at all
-				statsLine = statsLeft;
-			}
+		} else {
+			// Teamwork mode: active members take the model slot, stacked vertically.
+			statsLine = statsLeft;
+			teamRemainders = alignTeamworkLines(teamLines, statsLeftWidth, width);
 		}
 
 		// Apply dim to each part separately. statsLeft may contain color codes (for context %)
@@ -237,7 +262,10 @@ export class FooterComponent implements Component {
 		const dimRemainder = theme.fg("dim", remainder);
 
 		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
-		const lines = [pwdLine, dimStatsLeft + dimRemainder];
+		const lines =
+			teamRemainders.length === 0
+				? [pwdLine, dimStatsLeft + dimRemainder]
+				: [pwdLine, `${dimStatsLeft}${teamRemainders[0]}`, ...teamRemainders.slice(1)];
 
 		// Add extension statuses on a single line, sorted by key alphabetically
 		const extensionStatuses = this.footerData.getExtensionStatuses();
