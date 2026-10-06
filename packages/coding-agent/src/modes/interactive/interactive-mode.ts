@@ -3639,6 +3639,7 @@ export class InteractiveMode {
 					} else if (isTeamworkEvent(teamwork)) {
 						this.teamworkPanel.updateFromEvent(teamwork);
 					}
+					this.teamworkPanel.settle();
 					this.teamworkPanel.collapse();
 					this.layoutTeamworkSide();
 					this.updateTeamworkStatusBlock();
@@ -4280,6 +4281,7 @@ export class InteractiveMode {
 			this.themeController.disableAutoSync();
 			await this.ui.terminal.drainInput(1000);
 			this.stop();
+			await this.settingsManager.flush();
 			process.exit(0);
 		}
 
@@ -4293,6 +4295,7 @@ export class InteractiveMode {
 
 		this.stop();
 		await this.runtimeHost.dispose();
+		await this.settingsManager.flush();
 
 		const resumeCommand = formatResumeCommand(this.sessionManager);
 		if (resumeCommand) {
@@ -5307,7 +5310,9 @@ export class InteractiveMode {
 				id: this.session.model?.id ?? "?",
 				thinkingLevel: this.session.thinkingLevel,
 			},
-			...(runId === undefined ? {} : { runLine: `· ${runId} 运行中` }),
+			...(runId === undefined || snapshot?.phase === "done" || snapshot?.phase === "failed"
+				? {}
+				: { runLine: `· ${runId} 运行中` }),
 			...(extensionLines.length === 0 ? {} : { extensionLines }),
 			mcpServers: mcpSnapshot.servers,
 			...(mcpSnapshot.error === undefined ? {} : { mcpError: mcpSnapshot.error }),

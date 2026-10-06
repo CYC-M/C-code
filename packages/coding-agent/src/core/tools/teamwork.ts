@@ -10,7 +10,7 @@ import { summarizeResults } from "../teamwork/context.ts";
 import {
 	canonicalizeWorkerTaskRoles,
 	formatWorkerLabel,
-	RESERVED_ROLE_IDS,
+	isWorkerRoleId,
 	workerDescriptionsInTasks,
 	workerRolesInTasks,
 } from "../teamwork/naming.ts";
@@ -182,6 +182,30 @@ function formatUsageSummary(final: TeamRunState): string | undefined {
 	return `Tokens:\n${parts.map((p) => `- ${p}`).join("\n")}`;
 }
 
+/** Max reviewer findings inlined in the tool result; the rest stays in `teamwork-run`. */
+const MAX_REVIEW_FINDINGS = 20;
+
+function formatReviewDetails(final: TeamRunState): string[] {
+	const review = final.reviews[final.reviews.length - 1];
+	if (!review) return [];
+	const lines = [`Review: ${review.verdict} (${review.findings.length} findings)`];
+	for (const f of review.findings.slice(0, MAX_REVIEW_FINDINGS)) {
+		lines.push(`- [${f.severity}] ${f.taskId ?? "-"}: ${f.detail} → ${f.suggestion}`);
+	}
+	if (review.findings.length > MAX_REVIEW_FINDINGS) {
+		lines.push(`…${review.findings.length - MAX_REVIEW_FINDINGS} more, see teamwork-run`);
+	}
+	const failedIds = [...new Set(review.findings.map((f) => f.taskId).filter((id) => id !== undefined))];
+	if (failedIds.length > 0) lines.push(`FailedTaskIds: ${failedIds.join(", ")}`);
+	if (review.retryPlan) {
+		lines.push(`Retry: tasks ${review.retryPlan.taskIds.join(", ")} — ${review.retryPlan.instructions}`);
+	}
+	if (final.phase !== "done") {
+		lines.push(`Continue: call teamwork again with {continueRunId: "${final.runId}", tasks: <revised>}`);
+	}
+	return lines;
+}
+
 export function createTeamworkToolDefinition(
 	cwd: string,
 	options?: TeamworkToolOptions,
@@ -203,6 +227,42 @@ export function createTeamworkToolDefinition(
 				throw new Error("teamwork: no tasks provided");
 			}
 			const settings = options?.settingsManager;
+			// Worker bindings are single-use per task: snapshot the pre-run worker
+			// pool so the teardown restores it (pre-bound workers survive with
+			// their initial values, task-local workers are dropped).
+			const snapshotWorkers = (): Record<string, RoleModelRef> => {
+				const snap: Record<string, RoleModelRef> = {};
+				for (const [role, ref] of Object.entries(settings?.getRoleModels?.() ?? {})) {
+					if (isWorkerRoleId(role)) snap[role] = { ...ref };
+				}
+				return snap;
+			};
+			const initialWorkerSnapshot = snapshotWorkers();
+			const restoreWorkerBindings = async (): Promise<{ restored: string[]; dropped: string[] }> => {
+				const restored: string[] = [];
+				const dropped: string[] = [];
+				const current = settings?.getRoleModels?.() ?? {};
+				const seen = new Set([...Object.keys(initialWorkerSnapshot), ...Object.keys(current)]);
+				for (const role of seen) {
+					if (!isWorkerRoleId(role)) continue;
+					const initial = initialWorkerSnapshot[role];
+					if (initial === undefined) {
+						if (current[role] !== undefined && typeof settings?.clearRoleModel === "function") {
+							settings.clearRoleModel(role);
+							dropped.push(role);
+						}
+					} else if (
+						current[role]?.provider !== initial.provider ||
+						current[role]?.model !== initial.model ||
+						current[role]?.thinkingLevel !== initial.thinkingLevel
+					) {
+						settings?.setRoleModel?.(role, { ...initial });
+						restored.push(role);
+					}
+				}
+				await settings?.flush?.();
+				return { restored, dropped };
+			};
 			let run: TeamRunState;
 			if (params.continueRunId) {
 				const prior = findPriorRun(ctx, params.continueRunId);
@@ -232,7 +292,10 @@ export function createTeamworkToolDefinition(
 						}
 					}
 					const stillMissing = missingRetry.filter((role) => run.team.roles[role] === undefined);
-					if (stillMissing.length > 0) throw unboundWorkersError(stillMissing, labels);
+					if (stillMissing.length > 0) {
+						await restoreWorkerBindings();
+						throw unboundWorkersError(stillMissing, labels);
+					}
 				}
 			} else {
 				const roleModels = settings?.getRoleModels();
@@ -242,7 +305,10 @@ export function createTeamworkToolDefinition(
 					const labels = workerDescriptionsInTasks(tasks);
 					await options?.ensureWorkerBindings?.(missing, labels, buildWorkerPreviews(tasks, missing));
 					const stillMissing = unboundWorkerRoles(settings?.getRoleModels(), tasks);
-					if (stillMissing.length > 0) throw unboundWorkersError(stillMissing, labels);
+					if (stillMissing.length > 0) {
+						await restoreWorkerBindings();
+						throw unboundWorkersError(stillMissing, labels);
+					}
 				}
 				const team = assembleTeamConfig(settings?.getRoleModels(), params.budget ?? undefined);
 				run = createRun(params.goal, team, tasks);
@@ -328,12 +394,11 @@ export function createTeamworkToolDefinition(
 			if (lastReview?.usage !== undefined && reviewerRef) {
 				recordUsage(lastReview.usage, reviewerRef.provider, reviewerRef.model, "review");
 			}
-			// Worker bindings are single-use: the next task re-binds its models.
-			// Leader and reviewer survive; a continueRunId retry re-prompts for workers.
-			for (const role of Object.keys(run.team.roles)) {
-				if (!RESERVED_ROLE_IDS.has(role)) settings?.clearRoleModel?.(role);
-			}
-			const review = final.reviews[final.reviews.length - 1];
+			// Worker bindings are single-use per task: restore the pre-run pool.
+			// Pre-bound workers survive with their initial values; task-local
+			// workers are dropped. Leader and reviewer are untouched.
+			// Flush synchronously: quitting right after the run must not resurrect them.
+			const { restored, dropped } = await restoreWorkerBindings();
 			const summary = [
 				`Team run ${final.runId}: ${final.phase}${final.downgraded ? " (downgraded)" : ""}`,
 				summarizeResults(final.results, final.tasks),
@@ -341,7 +406,9 @@ export function createTeamworkToolDefinition(
 			const tokenLines = formatUsageSummary(final);
 			if (tokenLines !== undefined) summary.push(tokenLines);
 			if (haltError) summary.push(`Halted: ${haltError}`);
-			if (review) summary.push(`Review: ${review.verdict} (${review.findings.length} findings)`);
+			summary.push(...formatReviewDetails(final));
+			if (dropped.length > 0) summary.push(`Dropped single-use bindings: ${dropped.join(", ")}`);
+			if (restored.length > 0) summary.push(`Restored bindings: ${restored.join(", ")}`);
 			return {
 				content: [{ type: "text", text: summary.join("\n") }],
 				details: { runId: final.runId, phase: final.phase },

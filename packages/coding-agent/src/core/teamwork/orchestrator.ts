@@ -224,6 +224,15 @@ async function maybeDelegate(
 	};
 	if (subBudget.maxWorkerCalls === 0) return undefined;
 	const subTasks = delegate.tasks.map((t, i) => ({ ...t, id: `${task.id}.${i}` }));
+	// Keep sub-run boundary events off the parent panel stream: a sub-run
+	// `teamwork.started` with a different runId would reset the parent panel
+	// in the TUI (and its `teamwork.completed` is internal bookkeeping).
+	// Member/review progress still flows through; the panel ignores foreign
+	// runIds and the parent summary notes the sub-run phase.
+	const parentEvents: typeof onEvent = (event) => {
+		if (event.type === "teamwork.started" || event.type === "teamwork.completed") return;
+		onEvent?.(event);
+	};
 	const sub = await runTeamRound(
 		{
 			...createSubState(run, delegate.goal, subTasks),
@@ -232,7 +241,7 @@ async function maybeDelegate(
 		client,
 		readFile,
 		depth + 1,
-		onEvent,
+		parentEvents,
 	);
 	run.budget.workerCallsUsed += sub.budget.workerCallsUsed;
 	return sub;
@@ -284,10 +293,11 @@ async function callReviewer(
 	assertWorkerCallBudget(run, 1);
 	run.budget.workerCallsUsed += 1;
 	const report = Object.values(run.results)
-		.map(
-			(r) =>
-				`Task ${r.taskId} [${r.status}]: ${r.summary}\nGoal check: ${run.tasks.find((t) => t.id === r.taskId)?.goal ?? ""}`,
-		)
+		.map((r) => {
+			const task = run.tasks.find((t) => t.id === r.taskId);
+			const criteria = (task?.successCriteria ?? []).join("；");
+			return `Task ${r.taskId} [${r.status}]: ${r.summary}\nGoal: ${task?.goal ?? ""}\nCriteria: ${criteria}`;
+		})
 		.join("\n\n");
 	onEvent?.({ type: "review.started", runId: run.runId, provider: ref.provider, model: ref.id });
 	const completion = await client.complete(

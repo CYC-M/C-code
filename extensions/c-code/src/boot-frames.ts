@@ -71,8 +71,11 @@ export function logoMatrix(): string[] {
 	return rows;
 }
 
+/** 模块加载即构建并校验字模：glyph 缺失直接 fail-fast，渲染期零重复分配。 */
+const LOGO_MATRIX: readonly string[] = logoMatrix();
+
 function logoRow(paint: BootPaint, row: number, revealed: number, scale: number): string {
-	const line = logoMatrix()[row];
+	const line = LOGO_MATRIX[row] ?? "";
 	let out = "";
 	for (const cell of line) {
 		if (cell === "#") {

@@ -25,6 +25,7 @@ export function createZhCommands(version: string): ZhCommandDef[] {
 						"/模式 —— 切换 plan/build/yolo",
 						"/加模型 —— 交互式添加自定义模型商",
 						"/关于 —— 版本与主题信息",
+						"子代理：让 agent「用 task 调研 X」（独立只读进程，不能改文件）",
 						"常用原生命令：/model /new /compact /session /quit",
 					].join("\n"),
 					"info",

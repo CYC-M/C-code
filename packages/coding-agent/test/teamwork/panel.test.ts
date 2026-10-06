@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyTeamworkEvent, initPanelState } from "../../src/core/teamwork/panel.ts";
+import { applyTeamworkEvent, initPanelState, settlePanelState } from "../../src/core/teamwork/panel.ts";
 import type { TeamRoster, TeamworkEvent } from "../../src/core/teamwork/types.ts";
 
 const team: TeamRoster = {
@@ -159,5 +159,22 @@ describe("teamwork panel reducer", () => {
 		expect(state.members[1]).toMatchObject({ status: "needs_fix" });
 		expect(state.members[2]).toMatchObject({ status: "failed" });
 		expect(state.members[3]).toMatchObject({ status: "completed" });
+	});
+});
+
+describe("settlePanelState", () => {
+	it("lands lingering working and reviewing members as completed", () => {
+		const started = applyTeamworkEvent(initPanelState("run-1", "ship it", team), startedA());
+		const settled = settlePanelState(started);
+		expect(settled.members.find((m) => m.kind === "worker" && m.roleId === "worker-a")?.status).toBe("completed");
+		expect(settled.members.find((m) => m.kind === "leader")?.status).toBe("completed");
+	});
+
+	it("leaves terminal members and run metadata untouched", () => {
+		const started = applyTeamworkEvent(initPanelState("run-1", "ship it", team), startedA());
+		const settled = settlePanelState(started);
+		expect(settled.runId).toBe("run-1");
+		expect(settled.phase).toBe(started.phase);
+		expect(settled.members.find((m) => m.kind === "worker" && m.roleId === "worker-b")?.status).toBe("pending");
 	});
 });

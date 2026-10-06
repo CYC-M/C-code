@@ -476,7 +476,10 @@ export class AgentSession {
 		});
 		// Non-blocking: placeholder states publish synchronously via the
 		// snapshot; tools merge in as each server finishes connecting.
+		// Heartbeat self-heals transient drops and picks up keys added later
+		// via `/mcp add --key` without manual reconnects.
 		void this._mcpManager.connectAll();
+		this._mcpManager.startHeartbeat();
 		if (this._initialActiveToolNames === undefined) this._restoreToolsFromTranscript();
 	}
 

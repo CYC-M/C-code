@@ -126,4 +126,53 @@ describe("orchestrator", () => {
 		// Sub carve is remaining - 1 to reserve the parent reviewer call.
 		expect(final.budget.workerCallsUsed).toBe(4);
 	});
+
+	it("keeps sub-run boundary events off the parent panel stream", async () => {
+		const teamWithSub: TeamConfig = {
+			roles: {
+				worker: { provider: "o", model: "m", systemPrompt: "W", allowSubAgents: true },
+				reviewer: { provider: "o", model: "m", systemPrompt: "R" },
+			},
+			reviewer: "reviewer",
+			budget: { maxRounds: 3, maxWorkerCalls: 6 },
+			executor: "serial",
+		};
+		const run = createRun("goal", teamWithSub, tasks);
+		const client = {
+			find: (provider: string, model: string) => ({ provider, id: model }),
+			hasConfiguredAuth: () => true,
+			complete: async (_model: unknown, context: { systemPrompt?: string; messages: { content: unknown }[] }) => {
+				const text = JSON.stringify(context);
+				if (text.includes("Run team-"))
+					return {
+						text: '{"verdict":"pass","findings":[]}',
+						usage: { input: 50, output: 20, cacheRead: 5, cacheWrite: 0, total: 75 },
+					};
+				if (text.includes("Task t1:"))
+					return {
+						text: '{"summary":"parent","data":{"delegate":{"goal":"sub","tasks":[{"id":"s","title":"s","goal":"sg","role":"worker","successCriteria":["c"]}]}}}',
+						usage: { input: 100, output: 40, cacheRead: 10, cacheWrite: 0, total: 150 },
+					};
+				return {
+					text: '{"summary":"done"}',
+					usage: { input: 80, output: 30, cacheRead: 0, cacheWrite: 0, total: 110 },
+				};
+			},
+		};
+		const events: { type: string; runId: string }[] = [];
+		const final = await runTeamRound(
+			run,
+			client,
+			async () => "",
+			0,
+			(e) => {
+				events.push({ type: e.type, runId: e.runId });
+			},
+		);
+		expect(final.phase).toBe("done");
+		// A sub-run started/completed pair must not reset the parent panel:
+		// exactly one parent teamwork.started and one parent teamwork.completed.
+		expect(events.filter((e) => e.type === "teamwork.started").map((e) => e.runId)).toEqual([final.runId]);
+		expect(events.filter((e) => e.type === "teamwork.completed").map((e) => e.runId)).toEqual([final.runId]);
+	});
 });

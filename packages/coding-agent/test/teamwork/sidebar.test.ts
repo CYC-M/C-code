@@ -603,7 +603,7 @@ describe("teamwork sidebar connection lamps", () => {
 		expect(rows.find((row) => row.role === "reviewer")?.lamp).toBe("unbound");
 	});
 
-	it("keeps a working live worker visible even before its binding lands", () => {
+	it("hides even a working live worker without a binding", () => {
 		const rows = formatTeamworkSidebarRows({
 			...base,
 			hasAuth: () => true,
@@ -613,9 +613,7 @@ describe("teamwork sidebar connection lamps", () => {
 			},
 			statuses: { leader: "pending", workers: { "worker-z": "working" }, reviewer: "pending" },
 		});
-		const live = rows.find((row) => row.role === "worker-z");
-		expect(live?.lamp).toBe("unbound");
-		expect(live?.active).toBe(true);
+		expect(rows.find((row) => row.role === "worker-z")).toBeUndefined();
 	});
 
 	it("renders green, red, and hollow lamps", () => {

@@ -45,8 +45,8 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "compact", description: "Manually compact the session context" },
 	{
 		name: "mcp",
-		description: "Core MCP servers: status, reconnect, add",
-		argumentHint: "[status|reconnect [server]|add <name> <url> [--no-auth] [--project]]",
+		description: "Core MCP servers: status, doctor, reconnect, add (key persists to auth.json)",
+		argumentHint: "[status|doctor|reconnect [server]|add <name> <url> [--no-auth] [--project] [--key <secret>]]",
 	},
 	{ name: "resume", description: "Resume a different session" },
 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, themes, and context files" },

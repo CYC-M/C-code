@@ -13,15 +13,24 @@ import type { ToolDefinition } from "../src/core/extensions/index.ts";
 import {
 	defaultMcpConfig,
 	ensureObjectSchema,
+	getMcpAuthPath,
 	interpolateEnv,
 	jsonSchemaToTypeBox,
 	loadMcpConfigFile,
+	loadMergedMcpConfig,
+	MCP_CONNECT_RETRIES,
+	MCP_CONNECT_TIMEOUT_MS,
 	McpManager,
 	mcpContentToText,
+	mcpEnvVarToProviderId,
 	missingEnvName,
 	normalizeMcpToolName,
+	persistMcpEnvValue,
+	readMcpAuthValue,
 	resolveMcpConfigPath,
+	resolveMcpEnvValue,
 	sanitizeError,
+	withMcpTimeout,
 } from "../src/core/mcp-manager.ts";
 
 let savedEnv: NodeJS.ProcessEnv;
@@ -71,11 +80,17 @@ describe("mcp-manager env interpolation", () => {
 	});
 
 	it("resolves missing variables to empty string and reports their name", () => {
-		expect(interpolateEnv("Bearer {env:ORIGINKIT_API_KEY}")).toBe("Bearer ");
-		expect(missingEnvName("Bearer {env:ORIGINKIT_API_KEY}")).toBe("ORIGINKIT_API_KEY");
-		expect(missingEnvName("Bearer abc")).toBeUndefined();
-		process.env.ORIGINKIT_API_KEY = "k";
-		expect(missingEnvName("Bearer {env:ORIGINKIT_API_KEY}")).toBeUndefined();
+		// Isolated agentDir (no auth.json) so the real user keyring never leaks into this test.
+		const agentDir = mkdtempSync(join(tmpdir(), "mcp-empty-"));
+		try {
+			expect(interpolateEnv("Bearer {env:ORIGINKIT_API_KEY}", agentDir)).toBe("Bearer ");
+			expect(missingEnvName("Bearer {env:ORIGINKIT_API_KEY}", agentDir)).toBe("ORIGINKIT_API_KEY");
+			expect(missingEnvName("Bearer abc", agentDir)).toBeUndefined();
+			process.env.ORIGINKIT_API_KEY = "k";
+			expect(missingEnvName("Bearer {env:ORIGINKIT_API_KEY}", agentDir)).toBeUndefined();
+		} finally {
+			rmSync(agentDir, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -243,6 +258,134 @@ describe("McpManager lifecycle without network", () => {
 		try {
 			const { manager } = makeManager(cwd, agentDir);
 			await expect(manager.reconnect("nope")).rejects.toThrow("未知 server");
+			await manager.dispose();
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("mcp-manager auth.json persistence (once-configure)", () => {
+	it("maps env vars to auth provider ids", () => {
+		expect(mcpEnvVarToProviderId("ORIGINKIT_API_KEY")).toBe("mcp-originkit");
+		expect(mcpEnvVarToProviderId("MY_SERVICE_TOKEN")).toBe("mcp-my-service");
+	});
+
+	it("resolves env first, then auth.json fallback", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "mcp-auth-"));
+		try {
+			delete process.env.ORIGINKIT_API_KEY;
+			persistMcpEnvValue("ORIGINKIT_API_KEY", "auth-file-key", agentDir);
+			expect(readMcpAuthValue("ORIGINKIT_API_KEY", agentDir)).toBe("auth-file-key");
+			expect(resolveMcpEnvValue("ORIGINKIT_API_KEY", agentDir)).toBe("auth-file-key");
+			expect(missingEnvName("Bearer {env:ORIGINKIT_API_KEY}", agentDir)).toBeUndefined();
+			expect(interpolateEnv("Bearer {env:ORIGINKIT_API_KEY}", agentDir)).toBe("Bearer auth-file-key");
+			process.env.ORIGINKIT_API_KEY = "env-key";
+			expect(resolveMcpEnvValue("ORIGINKIT_API_KEY", agentDir)).toBe("env-key");
+			expect(interpolateEnv("Bearer {env:ORIGINKIT_API_KEY}", agentDir)).toBe("Bearer env-key");
+		} finally {
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("connects without env when auth.json has the key", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "mcp-core-"));
+		const agentDir = mkdtempSync(join(tmpdir(), "mcp-agent-"));
+		try {
+			delete process.env.ORIGINKIT_API_KEY;
+			persistMcpEnvValue("ORIGINKIT_API_KEY", "auth-file-key", agentDir);
+			const { manager } = makeManager(cwd, agentDir);
+			// No network in test: connect will fail on network, but must NOT fail on missing key.
+			await manager.connectAll();
+			const snapshot = manager.getSnapshot();
+			expect(snapshot.servers[0]?.error ?? "").not.toContain("ORIGINKIT_API_KEY");
+			expect(getMcpAuthPath(agentDir).endsWith("auth.json")).toBe(true);
+			await manager.dispose();
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("mcp-manager merged config (global single source)", () => {
+	it("merges global + project (project overrides same name)", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "mcp-merge-"));
+		const agentDir = mkdtempSync(join(tmpdir(), "mcp-agent-"));
+		try {
+			mkdirSync(join(cwd, ".c-code"), { recursive: true });
+			mkdirSync(join(agentDir, "extensions"), { recursive: true });
+			writeFileSync(
+				join(agentDir, "extensions", "mcp.json"),
+				JSON.stringify({
+					servers: {
+						originkit: { type: "remote", url: "https://mcp.originkit.dev/mcp" },
+						global_only: { type: "remote", url: "https://example.com/global" },
+					},
+				}),
+			);
+			writeFileSync(
+				join(cwd, ".c-code", "mcp.json"),
+				JSON.stringify({
+					servers: {
+						originkit: { type: "remote", url: "https://mcp.originkit.dev/mcp-project" },
+						project_only: { type: "remote", url: "https://example.com/project" },
+					},
+				}),
+			);
+			const merged = loadMergedMcpConfig(cwd, { agentDir, projectTrusted: true });
+			expect(Object.keys(merged.config.servers ?? {}).sort()).toEqual(["global_only", "originkit", "project_only"]);
+			expect((merged.config.servers?.originkit as { url: string }).url).toContain("mcp-project");
+			expect(merged.paths.globalPath).toContain("mcp.json");
+			// Untrusted project is ignored, global wins.
+			const untrusted = loadMergedMcpConfig(cwd, { agentDir, projectTrusted: false });
+			expect(Object.keys(untrusted.config.servers ?? {}).sort()).toEqual(["global_only", "originkit"]);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("mcp-manager resilience (timeout + heartbeat)", () => {
+	it("exposes sane timeout/retry budgets", () => {
+		expect(MCP_CONNECT_TIMEOUT_MS).toBeGreaterThanOrEqual(5000);
+		expect(MCP_CONNECT_TIMEOUT_MS).toBeLessThanOrEqual(30000);
+		expect(MCP_CONNECT_RETRIES).toBeGreaterThanOrEqual(1);
+	});
+
+	it("withMcpTimeout rejects slow operations", async () => {
+		const slow = new Promise((resolve) => setTimeout(() => resolve("late"), 200));
+		await expect(withMcpTimeout(slow, 20, "unit-test")).rejects.toThrow("unit-test");
+		await expect(withMcpTimeout(Promise.resolve("fast"), 500, "unit-test")).resolves.toBe("fast");
+	});
+
+	it("reconnect surfaces friendly errors on malformed config", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "mcp-core-"));
+		const agentDir = mkdtempSync(join(tmpdir(), "mcp-agent-"));
+		try {
+			const badPath = join(cwd, "mcp.json");
+			writeFileSync(badPath, "{nope");
+			process.env.C_CODE_MCP_CONFIG = badPath;
+			const { manager } = makeManager(cwd, agentDir);
+			await expect(manager.reconnect("originkit")).rejects.toThrow();
+			await manager.dispose();
+		} finally {
+			delete process.env.C_CODE_MCP_CONFIG;
+			rmSync(cwd, { recursive: true, force: true });
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("heartbeat start/stop is safe without servers", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "mcp-core-"));
+		const agentDir = mkdtempSync(join(tmpdir(), "mcp-agent-"));
+		try {
+			const { manager } = makeManager(cwd, agentDir);
+			manager.startHeartbeat(50);
+			await manager.healthCheck();
+			manager.stopHeartbeat();
 			await manager.dispose();
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });

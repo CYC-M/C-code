@@ -135,4 +135,23 @@ describe("formatTeamworkStatusLines", () => {
 		const lines = formatTeamworkStatusLines(started, undefined, { provider: "kimi", id: "k3" });
 		expect(lines.map((l) => l.text)).toEqual(["【worker1-UI designer】kimi k3 off"]);
 	});
+
+	it("renders — for worker/reviewer with unknown provider/model", () => {
+		const unknownTeam = {
+			leader: { provider: "kimi", model: "k3" },
+			workers: [{ roleId: "worker1", provider: "?", model: "?", description: "UI designer" }],
+			reviewer: { provider: "?", model: "?" },
+		};
+		const started = initPanelState("r1", "goal", unknownTeam);
+		started.members.find((m) => m.roleId === "worker1")!.status = "working";
+		expect(formatTeamworkStatusLines(started, undefined, { provider: "kimi", id: "k3" }).map((l) => l.text)).toEqual([
+			"【worker1-UI designer】— — off",
+		]);
+		const reviewing = initPanelState("r1", "goal", unknownTeam);
+		for (const m of reviewing.members) m.status = "completed";
+		reviewing.members.find((m) => m.kind === "reviewer")!.status = "reviewing";
+		expect(
+			formatTeamworkStatusLines(reviewing, undefined, { provider: "kimi", id: "k3" }).map((l) => l.text),
+		).toEqual(["【reviewer】— — off"]);
+	});
 });

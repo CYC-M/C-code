@@ -1,6 +1,6 @@
 {
 	"name": "@earendil-works/pi-session-backend-sqlite-node",
-	"version": "0.1.0-beta",
+	"version": "0.1.1-beta",
 	"description": "Node sqlite session backend for @earendil-works/pi-agent-core sessions",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -35,8 +35,8 @@
 		"node": ">=22.19.0"
 	},
 	"dependencies": {
-		"@earendil-works/pi-ai": "^0.1.0-beta",
-		"@earendil-works/pi-agent-core": "^0.1.0-beta"
+		"@earendil-works/pi-ai": "^0.1.1-beta",
+		"@earendil-works/pi-agent-core": "^0.1.1-beta"
 	},
 	"devDependencies": {
 		"@vitest/coverage-v8": "4.1.9",

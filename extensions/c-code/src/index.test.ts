@@ -7,6 +7,8 @@ function stubPi() {
 	const registered: string[] = [];
 	const shortcuts: { id: string; handler: (ctx: never) => Promise<void> }[] = [];
 	const commands: Record<string, { handler: (args: string, ctx: never) => Promise<void> }> = {};
+	const tools: Record<string, { name: string; executionMode?: string; parameters?: unknown }> = {};
+	const entries: { customType: string; data: unknown }[] = [];
 	let activeTools = ["read", "bash", "edit", "write", "grep"];
 	const pi = {
 		on: (event: string, handler: (event: unknown, ctx: never) => Promise<unknown>) => {
@@ -23,12 +25,18 @@ function stubPi() {
 		registerShortcut: (id: string, opts: { handler: (ctx: never) => Promise<void> }) => {
 			shortcuts.push({ id, handler: opts.handler });
 		},
+		registerTool: (tool: { name: string; executionMode?: string; parameters?: unknown }) => {
+			tools[tool.name] = tool;
+		},
+		appendEntry: (customType: string, data?: unknown) => {
+			entries.push({ customType, data });
+		},
 		getActiveTools: () => activeTools,
 		setActiveTools: (tools: string[]) => {
 			activeTools = tools;
 		},
 	};
-	return { pi, onCalls, registered, shortcuts, commands, getTools: () => activeTools };
+	return { pi, onCalls, registered, shortcuts, commands, tools, entries, getTools: () => activeTools };
 }
 
 const stubTheme = {
@@ -42,13 +50,13 @@ interface HeaderComponent {
 	dispose?(): void;
 }
 
-async function mountHeader(theme: { fg(name: string, text: string): string } = stubTheme) {
+async function mountHeader(reason: "startup" | "resume" | "new" | "fork" | "reload" = "startup", theme: { fg(name: string, text: string): string } = stubTheme) {
 	const { pi, onCalls, shortcuts } = stubPi();
 	cCodeExtension(pi as never);
 	const start = onCalls.find((c) => c.event === "session_start");
 	let factory: ((tui: never, theme: never) => HeaderComponent) | undefined;
 	const renders: number[] = [];
-	await start?.handler({}, { mode: "tui", ui: { setHeader: (f: typeof factory) => (factory = f) } } as never);
+	await start?.handler({ type: "session_start", reason }, { mode: "tui", ui: { setHeader: (f: typeof factory) => (factory = f) } } as never);
 	const component = factory?.({ requestRender: () => renders.push(1) } as never, theme as never);
 	return { component: component as HeaderComponent, renders, onCalls, shortcuts };
 }
@@ -70,12 +78,24 @@ describe("cCodeExtension", () => {
 		cCodeExtension(pi as never);
 		const start = onCalls.find((c) => c.event === "session_start");
 		const setHeaders: unknown[] = [];
-		await start?.handler({}, { mode: "tui", ui: { setHeader: (f: unknown) => setHeaders.push(f) } } as never);
+		await start?.handler({ type: "session_start", reason: "startup" }, { mode: "tui", ui: { setHeader: (f: unknown) => setHeaders.push(f) } } as never);
 		expect(setHeaders).toHaveLength(1);
 
 		const setHeaders2: unknown[] = [];
-		await start?.handler({}, { mode: "print", ui: { setHeader: (f: unknown) => setHeaders2.push(f) } } as never);
+		await start?.handler({ type: "session_start", reason: "startup" }, { mode: "print", ui: { setHeader: (f: unknown) => setHeaders2.push(f) } } as never);
 		expect(setHeaders2).toHaveLength(0);
+	});
+
+	test(`仅冷启动播动画：resume/new/fork/reload 直接静态终帧，不启 timer`, async () => {
+		vi.useFakeTimers();
+		const { component, renders } = await mountHeader("resume");
+		// 直接是完整 logo，无扫描线推进
+		const done = component.render(100).join("\n");
+		expect(done).toContain("█");
+		expect(done).toContain("C-code");
+		await vi.advanceTimersByTimeAsync(70 * TOTAL_FRAMES + 20);
+		expect(renders.length).toBe(0);
+		component.dispose?.();
 	});
 
 	test(`首帧空白，${TOTAL_FRAMES} 帧播完出现 logo + 版本并逐帧重绘`, async () => {
@@ -115,7 +135,7 @@ describe("cCodeExtension", () => {
 	test("turn_start 更新模型 id 并触发重绘；模式切换着色", async () => {
 		vi.useFakeTimers();
 		const colorTheme = { fg: (name: string, text: string) => `<${name}>${text}</>` };
-		const { component, renders, onCalls, shortcuts } = await mountHeader(colorTheme);
+		const { component, renders, onCalls, shortcuts } = await mountHeader("startup", colorTheme);
 		const turnStart = onCalls.find((c) => c.event === "turn_start");
 		await turnStart?.handler({}, { model: { id: "kimi-k2" } } as never);
 		expect(component.render(100).at(-1)).toBe("  C-code · kimi-k2 · <accent>build</>");
@@ -135,6 +155,75 @@ describe("cCodeExtension", () => {
 		await shortcut?.handler(ctx as never); // build→yolo
 		expect(component.render(100).at(-1)).toBe("  C-code · kimi-k2 · <error>yolo</>");
 		component.dispose?.();
+	});
+
+	test("model_select 即时更新模型 id 并重绘（不等下一轮 turn）", async () => {
+		vi.useFakeTimers();
+		const { component, renders, onCalls } = await mountHeader();
+		const modelSelect = onCalls.find((c) => c.event === "model_select");
+		await modelSelect?.handler({}, { model: { id: "deepseek-v4" } } as never);
+		expect(component.render(100).at(-1)).toBe("  C-code · deepseek-v4 · build");
+		expect(renders).toHaveLength(1);
+		// 同 id 不重复重绘
+		await modelSelect?.handler({}, { model: { id: "deepseek-v4" } } as never);
+		expect(renders).toHaveLength(1);
+		component.dispose?.();
+	});
+});
+
+describe("子代理 task 工具", () => {
+	test("注册 task 工具，顺序执行，参数上限 20k", () => {
+		const { pi, tools } = stubPi();
+		cCodeExtension(pi as never);
+		expect(Object.keys(tools)).toEqual(["task"]);
+		expect(tools.task.executionMode).toBe("sequential");
+		expect(tools.task.parameters).toBeDefined();
+	});
+
+	test("只读 profile（C_CODE_SUBAGENT=1）下不注册 task，写/shell 硬拒绝，read 放行", async () => {
+		vi.stubEnv("C_CODE_SUBAGENT", "1");
+		try {
+			const { pi, tools, onCalls } = stubPi();
+			cCodeExtension(pi as never);
+			expect(Object.keys(tools)).toHaveLength(0);
+			const call = onCalls.find((c) => c.event === "tool_call")?.handler;
+			const ctx = {
+				hasUI: true,
+				ui: {
+					setStatus: () => {},
+					notify: () => {},
+					select: async () => "允许",
+					theme: stubTheme,
+					setTheme: () => ({ success: true }),
+				},
+			};
+			expect(await call?.({ toolName: "bash", input: { command: "ls -la" } }, ctx as never)).toEqual(
+				expect.objectContaining({ block: true }),
+			);
+			expect(await call?.({ toolName: "edit", input: {} }, ctx as never)).toEqual(
+				expect.objectContaining({ block: true }),
+			);
+			expect(await call?.({ toolName: "read", input: {} }, ctx as never)).toBeUndefined();
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
+
+	test("非 profile 下 task 三档放行（只读契约）", async () => {
+		const { pi, onCalls } = stubPi();
+		cCodeExtension(pi as never);
+		const call = onCalls.find((c) => c.event === "tool_call")?.handler;
+		const ctx = {
+			hasUI: true,
+			ui: {
+				setStatus: () => {},
+				notify: () => {},
+				select: async () => "拒绝",
+				theme: stubTheme,
+				setTheme: () => ({ success: true }),
+			},
+		};
+		expect(await call?.({ toolName: "task", input: { prompt: "调研 x" } }, ctx as never)).toBeUndefined();
 	});
 });
 
@@ -217,6 +306,42 @@ describe("agent 模式切换", () => {
 		expect(await call({ toolName: "edit", input: {} }, yesCtx.ctx as never)).toBeUndefined();
 	});
 
+	test("headless（hasUI=false）build 下 edit 直接拒绝，不弹确认框", async () => {
+		const { toolCalls } = mountModes();
+		const ctx = {
+			hasUI: false,
+			ui: {
+				select: async () => {
+					throw new Error("headless 不应弹确认框");
+				},
+				notify: () => {},
+			},
+		};
+		const result = await toolCalls[0]({ toolName: "edit", input: {} }, ctx as never);
+		expect(result).toEqual(expect.objectContaining({ block: true }));
+		expect(JSON.stringify(result)).toContain("yolo");
+	});
+
+	test("plan 下 shell 逐条确认（只读承诺覆盖 shell）", async () => {
+		const { shortcuts, toolCalls } = mountModes();
+		const shortcut = shortcuts.find((s) => s.id === "shift+tab");
+		// build→yolo→plan
+		const denyCtx = stubModeCtx("拒绝");
+		await shortcut?.handler(denyCtx.ctx as never);
+		await shortcut?.handler(denyCtx.ctx as never);
+		// plan + 普通 bash：弹确认，拒绝即阻断
+		const blocked = await toolCalls[0]({ toolName: "bash", input: { command: "ls" } }, denyCtx.ctx as never);
+		expect(blocked).toEqual(expect.objectContaining({ block: true }));
+		expect(denyCtx.selects).toHaveLength(1);
+		// 选允许则放行
+		const allowCtx = stubModeCtx("允许");
+		await shortcut?.handler(allowCtx.ctx as never); // plan→build
+		await shortcut?.handler(allowCtx.ctx as never); // build→yolo
+		await shortcut?.handler(allowCtx.ctx as never); // yolo→plan
+		expect(await toolCalls[0]({ toolName: "bash", input: { command: "ls" } }, allowCtx.ctx as never)).toBeUndefined();
+		expect(allowCtx.selects).toHaveLength(1);
+	});
+
 	test("切到 yolo 后 edit 不再确认直接放行", async () => {
 		const { shortcuts, toolCalls } = mountModes();
 		const shortcut = shortcuts.find((s) => s.id === "shift+tab");
@@ -278,5 +403,17 @@ describe("agent 模式切换", () => {
 		await shortcut?.handler(ctx as never); // plan→build（green）
 		expect(status.at(-1)?.text).toContain("build");
 		expect(status.at(-1)?.text).toContain("<green:accent>");
+	});
+
+	test("session_start 静默套用默认 build 主题（fixes 启动颜色错乱）", async () => {
+		const { pi, onCalls } = stubPi();
+		cCodeExtension(pi as never);
+		const start = onCalls.find((c) => c.event === "session_start");
+		const { ctx, themes, notifies, status } = stubModeCtx();
+		const ui = { ...ctx.ui, setHeader: () => {} };
+		await start?.handler({}, { mode: "tui", model: { id: "m" }, hasUI: true, ui } as never);
+		expect(themes).toEqual(["c-code-green"]);
+		expect(notifies.some((m) => m.includes("已切换"))).toBe(false);
+		expect(status.at(-1)?.text).toContain("build");
 	});
 });

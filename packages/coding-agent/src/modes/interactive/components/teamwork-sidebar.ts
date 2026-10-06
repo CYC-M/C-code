@@ -159,11 +159,9 @@ export interface TeamworkSidebarSections {
 /** Worker role ids from the configured bindings plus any role the live run reported. */
 export function sidebarWorkerRoles(data: TeamworkSidebarData): string[] {
 	const configured = Object.keys(data.roleModels ?? {}).filter((role) => role !== "leader" && role !== "reviewer");
-	// Display matches bindings: a live role left over from a finished run (whose
-	// binding was cleared) stays hidden unless it is actively working right now.
-	const live = Object.keys(data.statuses?.workers ?? {}).filter(
-		(role) => configured.includes(role) || data.statuses?.workers[role] === "working",
-	);
+	// Display matches bindings exactly: a live role without a binding never lists.
+	// Mid-run prompts save the binding before the run proceeds, so runners keep theirs.
+	const live = Object.keys(data.statuses?.workers ?? {}).filter((role) => configured.includes(role));
 	const roles = new Set([...configured, ...live]);
 	return [...roles].sort(compareWorkerRoleIds);
 }

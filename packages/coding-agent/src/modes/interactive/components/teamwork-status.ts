@@ -31,6 +31,12 @@ function statusWorkerLabel(roleId: string, description?: string): string {
 	return trimmed ? `${roleId}-${trimmed}` : roleId;
 }
 
+function displayProviderModel(provider: string | undefined, model: string | undefined): [string, string] {
+	const p = provider ?? "—";
+	const m = model ?? "—";
+	return [p === "?" ? "—" : p, m === "?" ? "—" : m];
+}
+
 function thinkingFor(
 	role: string,
 	roleModels: Record<string, RoleModelRef> | undefined,
@@ -68,8 +74,7 @@ export function formatTeamworkStatusLines(
 	for (const w of workersWorking) {
 		const roleId = w.roleId ?? "?";
 		const ref = roleModels?.[roleId];
-		const provider = ref?.provider ?? w.provider ?? "—";
-		const model = ref?.model ?? w.model ?? "—";
+		const [provider, model] = displayProviderModel(ref?.provider ?? w.provider, ref?.model ?? w.model);
 		lines.push({
 			text: `【${statusWorkerLabel(roleId, w.description)}】${provider} ${model} ${thinkingFor(roleId, roleModels, sessionModel, false)}`,
 			active: true,
@@ -77,8 +82,7 @@ export function formatTeamworkStatusLines(
 	}
 	if (reviewerActive && reviewer) {
 		const ref = roleModels?.reviewer;
-		const provider = ref?.provider ?? reviewer.provider ?? "—";
-		const model = ref?.model ?? reviewer.model ?? "—";
+		const [provider, model] = displayProviderModel(ref?.provider ?? reviewer.provider, ref?.model ?? reviewer.model);
 		lines.push({
 			text: `【reviewer】${provider} ${model} ${thinkingFor("reviewer", roleModels, sessionModel, false)}`,
 			active: true,

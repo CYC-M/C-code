@@ -130,13 +130,14 @@ describe("teamwork tool", () => {
 		]);
 	});
 
-	it("clears worker bindings after the run but keeps leader and reviewer", async () => {
+	it("keeps pre-bound workers and drops only single-use bindings", async () => {
 		const store: Record<string, { provider: string; model: string }> = {
 			leader: { provider: "k", model: "lead" },
 			worker1: { provider: "o", model: "m" },
 			reviewer: { provider: "o", model: "r" },
 		};
 		const cleared: string[] = [];
+		let flushed = false;
 		const tool = createTeamworkToolDefinition("/work", {
 			sessionManager: {
 				appendCustomEntry: () => "e1",
@@ -151,9 +152,12 @@ describe("teamwork tool", () => {
 					cleared.push(role);
 					delete store[role];
 				},
+				flush: async () => {
+					flushed = true;
+				},
 			} as unknown as SettingsManager,
 		});
-		await tool.execute(
+		const result = await tool.execute(
 			"call-1",
 			{
 				goal: "fix",
@@ -165,10 +169,12 @@ describe("teamwork tool", () => {
 			undefined,
 			makeCtx(),
 		);
-		expect(cleared).toEqual(["worker1"]);
-		expect(store.worker1).toBeUndefined();
+		expect(cleared).toEqual([]);
+		expect(store.worker1).toEqual({ provider: "o", model: "m" });
 		expect(store.leader).toBeDefined();
 		expect(store.reviewer).toBeDefined();
+		expect(JSON.stringify(result.content)).not.toContain("Dropped single-use bindings");
+		expect(flushed).toBe(true);
 	});
 
 	it("rejects empty tasks before running", async () => {
@@ -628,5 +634,207 @@ describe("teamwork tool worker naming", () => {
 		const persisted = appended[0] as { team: { roles: Record<string, unknown> } };
 		expect(persisted.team.roles.worker2).toMatchObject({ provider: "o", model: "picked" });
 		expect(JSON.stringify(result.content)).toContain("did it");
+	});
+});
+
+describe("teamwork worker binding snapshot restore", () => {
+	function makeMutableSettings(initial: Record<string, { provider: string; model: string }>) {
+		let store = { ...initial };
+		return {
+			settings: {
+				getRoleModels: () => ({ ...store }),
+				setRoleModel: (role: string, ref: { provider: string; model: string }) => {
+					store = { ...store, [role]: ref };
+				},
+				clearRoleModel: (role: string) => {
+					const rest = { ...store };
+					delete rest[role];
+					store = rest;
+				},
+				flush: async () => {},
+			} as unknown as SettingsManager,
+			snapshot: () => ({ ...store }),
+		};
+	}
+
+	it("restores pre-bound workers and drops single-use workers", async () => {
+		const settings = makeMutableSettings({
+			worker1: { provider: "o", model: "m1" },
+			reviewer: { provider: "o", model: "rev" },
+		});
+		const tool = createTeamworkToolDefinition("/work", {
+			sessionManager: { appendCustomEntry: () => "e1" } as unknown as SessionManager,
+			settingsManager: settings.settings,
+			ensureWorkerBindings: async (roles) => {
+				for (const role of roles) settings.settings.setRoleModel(role, { provider: "o", model: "picked" });
+			},
+		});
+		const result = await tool.execute(
+			"call-1",
+			{
+				goal: "build",
+				tasks: [
+					{ id: "t1", title: "a", goal: "g", role: "worker1", successCriteria: ["c"] },
+					{ id: "t2", title: "b", goal: "g", role: "worker2", successCriteria: ["c"] },
+				],
+			},
+			undefined,
+			undefined,
+			makeCtx(),
+		);
+		// worker1 was bound before the run: kept with its initial value.
+		expect(settings.snapshot().worker1).toEqual({ provider: "o", model: "m1" });
+		// worker2 was bound single-use for this run: dropped afterwards.
+		expect(settings.snapshot().worker2).toBeUndefined();
+		expect(settings.snapshot().reviewer).toBeDefined();
+		const text = JSON.stringify(result.content);
+		expect(text).toContain("Dropped single-use bindings: worker2");
+		expect(text).not.toContain("Cleared bindings");
+	});
+
+	it("empty pool stays empty after run", async () => {
+		const settings = makeMutableSettings({ reviewer: { provider: "o", model: "rev" } });
+		const tool = createTeamworkToolDefinition("/work", {
+			sessionManager: { appendCustomEntry: () => "e1" } as unknown as SessionManager,
+			settingsManager: settings.settings,
+			ensureWorkerBindings: async (roles) => {
+				for (const role of roles) settings.settings.setRoleModel(role, { provider: "o", model: "picked" });
+			},
+		});
+		await tool.execute(
+			"call-1",
+			{ goal: "build", tasks: [{ id: "t1", title: "a", goal: "g", role: "worker1", successCriteria: ["c"] }] },
+			undefined,
+			undefined,
+			makeCtx(),
+		);
+		expect(settings.snapshot().worker1).toBeUndefined();
+		expect(settings.snapshot().reviewer).toBeDefined();
+	});
+});
+
+describe("teamwork reviewer full findings", () => {
+	function findingsCtx() {
+		return {
+			sessionManager: { getEntries: () => [] },
+			modelRegistry: {
+				find: (p: string, m: string) => ({ provider: p, id: m }),
+				hasConfiguredAuth: () => true,
+				complete: async (_m: unknown, context: { messages: { content: unknown }[] }) => {
+					const raw = JSON.stringify(context);
+					if (raw.includes("Run team-")) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										verdict: "needs_fix",
+										findings: [
+											{ severity: "blocker", taskId: "t1", detail: "missing login", suggestion: "redo t1" },
+											{ severity: "major", taskId: "t2", detail: "weak test", suggestion: "add test" },
+										],
+										retryPlan: { taskIds: ["t1", "t2"], instructions: "fix both" },
+									}),
+								},
+							],
+							usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+						};
+					}
+					return { content: [{ type: "text", text: '{"summary":"did it"}' }] };
+				},
+			},
+		} as unknown as ExtensionContext;
+	}
+
+	it("returns full reviewer findings with retryPlan and continue hint", async () => {
+		const tool = createTeamworkToolDefinition("/work", {
+			sessionManager: { appendCustomEntry: () => "e1" } as unknown as SessionManager,
+			settingsManager: {
+				getRoleModels: () => ({ worker1: { provider: "o", model: "m" }, reviewer: { provider: "o", model: "m" } }),
+			} as unknown as SettingsManager,
+		});
+		const result = await tool.execute(
+			"call-1",
+			{
+				goal: "build",
+				tasks: [
+					{ id: "t1", title: "a", goal: "g1", role: "worker1", successCriteria: ["c1"] },
+					{ id: "t2", title: "b", goal: "g2", role: "worker1", successCriteria: ["c2"] },
+				],
+			},
+			undefined,
+			undefined,
+			findingsCtx(),
+		);
+		const text = (result.content as { text: string }[]).map((c) => c.text).join("\n");
+		expect(text).toContain("Review: needs_fix (2 findings)");
+		expect(text).toContain("[blocker] t1: missing login → redo t1");
+		expect(text).toContain("[major] t2: weak test → add test");
+		expect(text).toContain("FailedTaskIds: t1, t2");
+		expect(text).toContain("Retry: tasks t1, t2 — fix both");
+		expect(text).toContain("continueRunId");
+	});
+
+	it("omits Retry/FailedTaskIds on pass", async () => {
+		const tool = createTeamworkToolDefinition("/work", {
+			sessionManager: { appendCustomEntry: () => "e1" } as unknown as SessionManager,
+			settingsManager: {
+				getRoleModels: () => ({ worker1: { provider: "o", model: "m" }, reviewer: { provider: "o", model: "m" } }),
+			} as unknown as SettingsManager,
+		});
+		const result = await tool.execute(
+			"call-1",
+			{ goal: "build", tasks: [{ id: "t1", title: "a", goal: "g", role: "worker1", successCriteria: ["c"] }] },
+			undefined,
+			undefined,
+			makeCtx(),
+		);
+		const text = (result.content as { text: string }[]).map((c) => c.text).join("\n");
+		expect(text).toContain("Review: pass");
+		expect(text).not.toContain("FailedTaskIds");
+		expect(text).not.toContain("Retry:");
+		expect(text).not.toContain("continueRunId");
+	});
+
+	it("caps findings at 20 lines with an overflow row", async () => {
+		const findings = Array.from({ length: 22 }, (_, i) => ({
+			severity: "minor",
+			taskId: "t1",
+			detail: `d${i}`,
+			suggestion: `s${i}`,
+		}));
+		const ctx = {
+			sessionManager: { getEntries: () => [] },
+			modelRegistry: {
+				find: (p: string, m: string) => ({ provider: p, id: m }),
+				hasConfiguredAuth: () => true,
+				complete: async (_m: unknown, context: { messages: { content: unknown }[] }) => {
+					if (JSON.stringify(context).includes("Run team-")) {
+						return {
+							content: [{ type: "text", text: JSON.stringify({ verdict: "needs_fix", findings }) }],
+							usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+						};
+					}
+					return { content: [{ type: "text", text: '{"summary":"did it"}' }] };
+				},
+			},
+		} as unknown as ExtensionContext;
+		const tool = createTeamworkToolDefinition("/work", {
+			sessionManager: { appendCustomEntry: () => "e1" } as unknown as SessionManager,
+			settingsManager: {
+				getRoleModels: () => ({ worker1: { provider: "o", model: "m" }, reviewer: { provider: "o", model: "m" } }),
+			} as unknown as SettingsManager,
+		});
+		const result = await tool.execute(
+			"call-1",
+			{ goal: "build", tasks: [{ id: "t1", title: "a", goal: "g", role: "worker1", successCriteria: ["c"] }] },
+			undefined,
+			undefined,
+			ctx,
+		);
+		const text = (result.content as { text: string }[]).map((c) => c.text).join("\n");
+		expect(text).toContain("Review: needs_fix (22 findings)");
+		expect(text).toContain("…2 more, see teamwork-run");
+		expect(text).not.toContain("d21");
 	});
 });

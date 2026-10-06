@@ -4,6 +4,7 @@ import {
 	applyTeamworkEvent,
 	initPanelState,
 	type PanelMember,
+	settlePanelState,
 	type TeamworkPanelState,
 } from "../../../core/teamwork/panel.ts";
 import type { TeamMemberStatus, TeamUsage, TeamworkEvent } from "../../../core/teamwork/types.ts";
@@ -214,6 +215,14 @@ export class TeamworkPanelComponent extends Container {
 
 	collapse(): void {
 		this.collapsed = true;
+		this.rebuild();
+		this.tui.requestRender();
+	}
+
+	/** Land lingering in-flight members when a run ends without a terminal event. */
+	settle(): void {
+		if (!this.state) return;
+		this.state = settlePanelState(this.state);
 		this.rebuild();
 		this.tui.requestRender();
 	}

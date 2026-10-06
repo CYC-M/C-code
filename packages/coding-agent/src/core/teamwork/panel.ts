@@ -72,6 +72,22 @@ function withReviewer(state: TeamworkPanelState, update: (m: PanelMember) => Pan
 	return { ...state, members: state.members.map((m) => (m.kind === "reviewer" ? update({ ...m }) : { ...m })) };
 }
 
+/**
+ * Land lingering in-flight members when a run ends without a terminal event
+ * (abort, error path): working/reviewing become completed so no row claims to
+ * still be running after the run is over. Everything else is untouched.
+ */
+export function settlePanelState(state: TeamworkPanelState): TeamworkPanelState {
+	return {
+		...state,
+		members: state.members.map((m) =>
+			m.status === "working" || m.status === "reviewing"
+				? { ...m, status: "completed" as TeamMemberStatus }
+				: { ...m },
+		),
+	};
+}
+
 export function applyTeamworkEvent(state: TeamworkPanelState, event: TeamworkEvent): TeamworkPanelState {
 	if (event.runId !== state.runId) {
 		return state;
